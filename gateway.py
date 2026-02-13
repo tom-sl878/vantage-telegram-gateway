@@ -82,6 +82,17 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
     logger.info(f"Received message from {chat_id}: {user_message}")
 
+    # Check if this message has a document (caption with file upload)
+    if update.message.document:
+        file_info = f"\n\n[User uploaded file: {update.message.document.file_name}]"
+        user_message = user_message + file_info if user_message else file_info
+        logger.info(f"Message includes document: {update.message.document.file_name}")
+    # Or check if there was a recent file upload
+    elif 'last_upload' in context.user_data:
+        upload_info = context.user_data['last_upload']
+        user_message = f"{user_message}\n\n[Recently uploaded file: {upload_info['filename']}]"
+        logger.info(f"Referencing recent upload: {upload_info['filename']}")
+
     # Send typing indicator
     await context.bot.send_chat_action(chat_id=chat_id, action="typing")
 
@@ -174,16 +185,18 @@ async def handle_document(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
         logger.info(f"Saved file to: {file_path}")
 
-        await update.message.reply_text(f"Received {document.file_name}. Processing...")
+        # Store file info in user context for LLM to access
+        context.user_data['last_upload'] = {
+            'filename': document.file_name,
+            'path': str(file_path),
+            'timestamp': update.message.date.isoformat()
+        }
 
-        # If it's a PDF, assume it's an RFP and trigger processing
-        if file_path.suffix.lower() == '.pdf':
-            # Simulate user message "Process this RFP"
-            update.message.text = "Process this RFP document"
-            await handle_message(update, context)
-        else:
+        # If user sent a caption (e.g., "Here you go"), Telegram will call handle_message separately
+        # If no caption, notify user
+        if not update.message.caption:
             await update.message.reply_text(
-                f"File saved. Use a command to tell me what to do with it (e.g., 'complete task 4')."
+                f"Received {document.file_name}. What would you like me to do with it?"
             )
 
     except Exception as e:
