@@ -247,7 +247,9 @@ def execute_tool(tool_name: str, arguments: Dict[str, Any]) -> Dict[str, Any]:
 
         elif tool_name == "complete_task":
             cmd = ["python3", str(TASK_SCRIPTS_DIR / "complete_task.py"), str(arguments["task_id"])]
-            result = subprocess.run(cmd, capture_output=True, text=True, timeout=60)
+            # Pass environment variables to subprocess (needed for VLLM_URL, VANTAGE_API_URL)
+            import os
+            result = subprocess.run(cmd, capture_output=True, text=True, timeout=60, env=os.environ.copy())
             return json.loads(result.stdout) if result.returncode == 0 else {"error": result.stderr}
 
         elif tool_name == "create_task":
