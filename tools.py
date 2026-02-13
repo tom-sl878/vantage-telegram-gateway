@@ -207,6 +207,18 @@ TOOLS = [
                 "required": ["project_slug"]
             }
         }
+    },
+    {
+        "type": "function",
+        "function": {
+            "name": "get_projects",
+            "description": "List all available projects. Use when user asks 'show me projects', 'list projects', 'my tasks' (to find current project), or when project slug is unknown.",
+            "parameters": {
+                "type": "object",
+                "properties": {},
+                "required": []
+            }
+        }
     }
 ]
 
@@ -288,6 +300,11 @@ def execute_tool(tool_name: str, arguments: Dict[str, Any]) -> Dict[str, Any]:
 
         elif tool_name == "delete_project":
             cmd = ["python3", str(PROJECT_SCRIPTS_DIR / "projects.py"), "delete", arguments["project_slug"]]
+            result = subprocess.run(cmd, capture_output=True, text=True, timeout=30)
+            return json.loads(result.stdout) if result.returncode == 0 else {"error": result.stderr}
+
+        elif tool_name == "get_projects":
+            cmd = ["python3", str(PROJECT_SCRIPTS_DIR / "projects.py"), "list"]
             result = subprocess.run(cmd, capture_output=True, text=True, timeout=30)
             return json.loads(result.stdout) if result.returncode == 0 else {"error": result.stderr}
 
