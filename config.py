@@ -19,7 +19,7 @@ RFP_SCRIPTS_DIR = Path(os.environ.get(
 ))
 PROJECT_SCRIPTS_DIR = Path(os.environ.get(
     "PROJECT_SCRIPTS_DIR",
-    "/Users/tom/Projects/OSAP/Vantage/OpenClaw/scripts"
+    "/Users/tom/Projects/OSAP/Vantage/OpenClaw/skills/project-manager/scripts"
 ))
 
 # Model Configuration
