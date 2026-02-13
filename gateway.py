@@ -96,43 +96,50 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
             {"role": "user", "content": user_message}
         ]
 
-        # Call vLLM with tools
-        response = await call_vllm(messages, TOOLS)
+        # Call vLLM with tools - loop until we get text response
+        max_iterations = 5  # Prevent infinite loops
+        iteration = 0
+        final_message = None
 
-        # Check if LLM wants to call tools
-        choice = response["choices"][0]
-        message = choice["message"]
+        while iteration < max_iterations:
+            response = await call_vllm(messages, TOOLS)
+            choice = response["choices"][0]
+            message = choice["message"]
 
-        if message.get("tool_calls"):
-            # Execute each tool call
-            logger.info(f"LLM requested {len(message['tool_calls'])} tool calls")
-            messages.append(message)
+            if message.get("tool_calls"):
+                # Execute each tool call
+                logger.info(f"LLM requested {len(message['tool_calls'])} tool calls (iteration {iteration + 1})")
+                messages.append(message)
 
-            for tool_call in message["tool_calls"]:
-                tool_name = tool_call["function"]["name"]
-                arguments = json.loads(tool_call["function"]["arguments"])
+                for tool_call in message["tool_calls"]:
+                    tool_name = tool_call["function"]["name"]
+                    arguments = json.loads(tool_call["function"]["arguments"])
 
-                logger.info(f"Executing tool: {tool_name} with args: {arguments}")
+                    logger.info(f"Executing tool: {tool_name} with args: {arguments}")
 
-                # Execute tool
-                tool_result = execute_tool(tool_name, arguments)
-                logger.info(f"Tool result: {tool_result}")
+                    # Execute tool
+                    tool_result = execute_tool(tool_name, arguments)
+                    logger.info(f"Tool result: {tool_result}")
 
-                # Add tool result to messages
-                messages.append({
-                    "role": "tool",
-                    "tool_call_id": tool_call["id"],
-                    "name": tool_name,
-                    "content": json.dumps(tool_result)
-                })
+                    # Add tool result to messages
+                    messages.append({
+                        "role": "tool",
+                        "tool_call_id": tool_call["id"],
+                        "name": tool_name,
+                        "content": json.dumps(tool_result)
+                    })
 
-            # Call LLM again with tool results to get final response
-            await context.bot.send_chat_action(chat_id=chat_id, action="typing")
-            final_response = await call_vllm(messages, TOOLS)
-            final_message = final_response["choices"][0]["message"]["content"]
-        else:
-            # No tool calls, use direct response
-            final_message = message["content"]
+                # Continue loop to call vLLM again
+                await context.bot.send_chat_action(chat_id=chat_id, action="typing")
+                iteration += 1
+            else:
+                # No more tool calls, we have final response
+                final_message = message["content"]
+                break
+
+        if not final_message:
+            logger.warning(f"No text response after {iteration} iterations")
+            final_message = "I executed the tools but couldn't generate a response."
 
         # Strip <think> tags if present
         final_message = strip_think_tags(final_message)
