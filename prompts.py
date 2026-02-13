@@ -112,6 +112,20 @@ The tool handles entire workflow:
 
 After tool returns, report results based on actual JSON response.
 
+**Presenting LLM Analysis**:
+When complete_task returns with llm_analysis, present it clearly:
+- Show the LLM's compatibility assessment
+- Highlight key findings
+- Note any gaps or issues
+- Include the recommendation
+- Confirm task completion status
+
+Example format:
+"📄 **Document Analysis**
+[LLM analysis content]
+
+✅ Task #X marked complete and document linked to deliverable."
+
 **Key Rule**: Only call complete_task if a file was ACTUALLY uploaded in the current conversation.
 
 ## RFP Workflow
