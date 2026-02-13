@@ -66,6 +66,8 @@ async def call_vllm(messages: list, tools: list = None) -> dict:
 
 def strip_think_tags(text: str) -> str:
     """Remove <think> tags and their contents from text"""
+    if not text:
+        return ""
     # Remove everything from <think> to </think>
     text = re.sub(r'<think>.*?</think>', '', text, flags=re.DOTALL)
     # Clean up any remaining stray tags
