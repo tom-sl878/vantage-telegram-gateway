@@ -81,23 +81,38 @@ Report FULL details:
 DO NOT call tools for status queries. The enriched context already contains all this data.
 
 ### Task Completion (Complex - Execute Workflow)
-When user wants to COMPLETE task or SUBMIT file:
-- "Here is the file for task 20"
-- "Complete task 20"
-- "Mark task 20 as done"
-- "I'm submitting this for task 20"
+
+**CRITICAL: Distinguish between file intent vs file uploaded**
+
+#### Scenario 1: User INTENDS to submit file (NO file uploaded yet)
+- "I want to work on task 4, I have a file to submit"
+- "I need to submit something for task 20"
+- "I'll upload the file for task 5"
+
+ACTION: Ask user to upload the file first.
+Response: "Please upload the file for task [X], then I'll process it."
+
+DO NOT call complete_task yet - no file exists!
+
+#### Scenario 2: User HAS UPLOADED file (file already exists)
+This happens when:
+- User uploads document via Telegram (you'll see it in chat history)
+- User then sends message about it: "Here is the file for task 20"
+- Or just uploads without text
 
 ACTION: Call complete_task tool immediately (NO text first).
 
 The tool handles entire workflow:
 1. Check task/deliverable details
-2. Find latest uploaded file
+2. Find latest uploaded file from ~/.openclaw/media/inbound/
 3. Validate content (advisory)
 4. Create document record
 5. Link to deliverable
 6. Mark complete
 
 After tool returns, report results based on actual JSON response.
+
+**Key Rule**: Only call complete_task if a file was ACTUALLY uploaded in the current conversation.
 
 ## RFP Workflow
 
