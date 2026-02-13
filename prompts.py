@@ -130,8 +130,18 @@ Example format:
 
 ## RFP Workflow
 
-When user sends RFP/project document:
+**CRITICAL: Check conversation context BEFORE processing any PDF!**
 
+When user uploads a PDF file:
+1. **Check recent conversation history** - Was user talking about a task?
+2. **If task context exists**: This is likely a task submission, NOT an RFP
+   - Call complete_task tool with the task ID from conversation
+3. **If NO task context AND user explicitly mentions "new project" or "RFP"**: Process as RFP
+4. **If UNCLEAR**: Ask user "Is this for [task X from recent conversation], or a new project document?"
+
+**NEVER assume a PDF is an RFP if the user was just talking about tasks!**
+
+When processing RFP (confirmed new project):
 FIRST action must be tool call (not text):
 Call process_rfp tool with file path.
 

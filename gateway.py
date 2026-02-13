@@ -100,12 +100,23 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
         # Get enriched context from backend
         enriched_context = await get_enriched_context(DEFAULT_PROJECT)
 
-        # Build message history with enriched context
+        # Get or initialize conversation history
+        if 'conversation_history' not in context.user_data:
+            context.user_data['conversation_history'] = []
+
+        history = context.user_data['conversation_history']
+
+        # Build message history with enriched context and conversation history
         messages = [
             {"role": "system", "content": SYSTEM_PROMPT},
             {"role": "system", "content": f"PROJECT CONTEXT:\n{enriched_context}"},
-            {"role": "user", "content": user_message}
         ]
+
+        # Add conversation history (last 10 messages to avoid context overflow)
+        messages.extend(history[-10:])
+
+        # Add current user message
+        messages.append({"role": "user", "content": user_message})
 
         # Call vLLM with tools - loop until we get text response
         max_iterations = 5  # Prevent infinite loops
@@ -162,6 +173,14 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
         # Send response to user
         await update.message.reply_text(final_message, parse_mode="HTML")
         logger.info(f"Sent response: {final_message[:100]}...")
+
+        # Save conversation to history
+        context.user_data['conversation_history'].append({"role": "user", "content": user_message})
+        context.user_data['conversation_history'].append({"role": "assistant", "content": final_message})
+
+        # Limit history to last 20 messages (10 exchanges) to prevent memory bloat
+        if len(context.user_data['conversation_history']) > 20:
+            context.user_data['conversation_history'] = context.user_data['conversation_history'][-20:]
 
     except Exception as e:
         error_msg = f"Error processing message: {str(e)}"
