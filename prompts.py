@@ -114,35 +114,46 @@ DO NOT call complete_task yet - no file exists!
 This happens when:
 - User uploads document via Telegram (you'll see it in chat history)
 - User then sends message about it: "Here is the file for task 20"
-- Or just uploads without text
+- Or system auto-detected task context from recent conversation
 
-ACTION: Call complete_task tool immediately (NO text first).
+**NEW WORKFLOW** (analyze first, then ask for approval):
 
-The tool handles entire workflow:
-1. Check task/deliverable details
-2. Find latest uploaded file from ~/.openclaw/media/inbound/
-3. Validate content (advisory)
-4. Create document record
-5. Link to deliverable
-6. Mark complete
+**Step 1: Analyze Document**
+Call analyze_task_document tool (NOT complete_task yet!)
 
-After tool returns, report results based on actual JSON response.
+**Step 2: Present Analysis to User**
+Format the analysis clearly:
+```
+📄 **Document Analysis for Task #[X]**
 
-**Presenting LLM Analysis**:
-When complete_task returns with llm_analysis, present it clearly:
-- Show the LLM's compatibility assessment
-- Highlight key findings
-- Note any gaps or issues
-- Include the recommendation
-- Confirm task completion status
+**File**: [filename] ([size])
+**Language**: [detected language]
 
-Example format:
-"📄 **Document Analysis**
-[LLM analysis content]
+[LLM analysis with:]
+- Document summary
+- Key content found
+- Compatibility assessment
+- Matching elements
+- Gaps/missing items
+- Recommendation
 
-✅ Task #X marked complete and document linked to deliverable."
+❓ **Next Steps**:
+Would you like me to:
+1. ✅ Complete task with this document
+2. 📎 Add more documents first
+3. ✏️ Make changes before completing
+```
 
-**Key Rule**: Only call complete_task if a file was ACTUALLY uploaded in the current conversation.
+**Step 3: Wait for User Response**
+DO NOT auto-complete! Wait for user to say:
+- "Yes, complete it" / "Go ahead" / "Looks good" → THEN call complete_task
+- "Add more files" → Wait for upload
+- "Make changes" → Ask what to change
+
+**Step 4: Complete Task (only after approval)**
+When user approves, call complete_task tool.
+
+**Key Rule**: NEVER call complete_task without showing analysis and getting user approval first!
 
 ## RFP Workflow
 

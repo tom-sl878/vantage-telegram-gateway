@@ -49,6 +49,23 @@ TOOLS = [
     {
         "type": "function",
         "function": {
+            "name": "analyze_task_document",
+            "description": "Analyze an uploaded document for task compatibility WITHOUT completing the task. Returns language detection, comprehensive analysis, and compatibility assessment. Use this BEFORE completing to show user analysis and ask for approval.",
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "task_id": {
+                        "type": "integer",
+                        "description": "Task identifier to analyze document for"
+                    }
+                },
+                "required": ["task_id"]
+            }
+        }
+    },
+    {
+        "type": "function",
+        "function": {
             "name": "complete_task",
             "description": "Complete a task with full file upload workflow. Fetches task and deliverable details, finds latest uploaded file, validates content, creates document record, links document to deliverable, and marks task complete.",
             "parameters": {
@@ -243,6 +260,12 @@ def execute_tool(tool_name: str, arguments: Dict[str, Any]) -> Dict[str, Any]:
         elif tool_name == "get_task":
             cmd = ["python3", str(TASK_SCRIPTS_DIR / "tasks.py"), "get", str(arguments["task_id"])]
             result = subprocess.run(cmd, capture_output=True, text=True, timeout=30)
+            return json.loads(result.stdout) if result.returncode == 0 else {"error": result.stderr}
+
+        elif tool_name == "analyze_task_document":
+            cmd = ["python3", str(TASK_SCRIPTS_DIR / "analyze_task_document.py"), str(arguments["task_id"])]
+            import os
+            result = subprocess.run(cmd, capture_output=True, text=True, timeout=60, env=os.environ.copy())
             return json.loads(result.stdout) if result.returncode == 0 else {"error": result.stderr}
 
         elif tool_name == "complete_task":

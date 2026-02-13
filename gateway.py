@@ -77,7 +77,12 @@ def strip_think_tags(text: str) -> str:
 
 async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
     """Handle incoming Telegram messages"""
-    user_message = update.message.text
+    # Check if this is a synthetic update with custom text
+    if hasattr(update, '_synthetic_text'):
+        user_message = update._synthetic_text
+    else:
+        user_message = update.message.text
+
     chat_id = update.effective_chat.id
 
     logger.info(f"Received message from {chat_id}: {user_message}")
@@ -211,12 +216,43 @@ async def handle_document(update: Update, context: ContextTypes.DEFAULT_TYPE):
             'timestamp': update.message.date.isoformat()
         }
 
-        # If user sent a caption (e.g., "Here you go"), Telegram will call handle_message separately
-        # If no caption, notify user
+        # If user sent a caption, Telegram will call handle_message separately with it
+        # If no caption, check conversation history for task context
         if not update.message.caption:
-            await update.message.reply_text(
-                f"Received {document.file_name}. What would you like me to do with it?"
-            )
+            # Check if user was recently talking about a task
+            history = context.user_data.get('conversation_history', [])
+            recent_messages = ' '.join([msg.get('content', '') for msg in history[-4:]])  # Last 2 exchanges
+
+            # Look for task mentions in recent conversation
+            import re
+            task_match = re.search(r'task (\d+)', recent_messages.lower())
+
+            if task_match:
+                task_id = task_match.group(1)
+                logger.info(f"Auto-detected task context: task {task_id}")
+
+                # Send confirmation and trigger analysis via handle_message
+                await update.message.reply_text(
+                    f"Received {document.file_name}. Analyzing for task {task_id}..."
+                )
+
+                # Create a synthetic message to trigger the LLM with file context
+                class SyntheticUpdate:
+                    def __init__(self, original_update, synthetic_text):
+                        self.message = original_update.message
+                        self.effective_chat = original_update.effective_chat
+                        self.effective_user = original_update.effective_user
+                        # Store synthetic text for message handler
+                        self._synthetic_text = synthetic_text
+
+                synthetic_update = SyntheticUpdate(update, f"Analyze this uploaded document for task {task_id}")
+                # Pass through to message handler
+                await handle_message(synthetic_update, context)
+            else:
+                # No task context - ask user
+                await update.message.reply_text(
+                    f"Received {document.file_name}. What would you like me to do with it?"
+                )
 
     except Exception as e:
         error_msg = f"Error handling document: {str(e)}"
