@@ -36,10 +36,10 @@ else
     echo "✓ .env file already exists"
 fi
 
-# Create media inbox directory
+# Create uploads directory
 echo ""
-echo "Creating media inbox directory..."
-mkdir -p ~/.openclaw/media/inbound
+echo "Creating uploads directory..."
+mkdir -p /Users/tom/Projects/OSAP/Vantage/backend/data/uploads
 
 echo ""
 echo "=== Setup Complete ==="

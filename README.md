@@ -4,8 +4,8 @@ Custom Telegram bot gateway for Vantage construction project management system.
 
 ## Overview
 
-This is a custom implementation that replaces OpenClaw, providing direct control over:
-- LLM interactions with vLLM server
+Direct LLM integration providing:
+- LLM interactions with vLLM or Claude
 - Tool execution via Python scripts
 - Backend API integration for enriched context
 - Telegram message handling
@@ -19,11 +19,11 @@ Custom Gateway (Python)
     ↓
 Backend API - Get enriched context
     ↓
-vLLM Server (Qwen3-8B) with tools
+LLM (Claude or vLLM) with tools
     ↓
 Gateway - Execute tool_calls
     ↓
-Return results to vLLM
+Return results to LLM
     ↓
 Gateway - Send final response to Telegram
 ```
@@ -55,7 +55,9 @@ Required:
 
 Optional (with defaults):
 - `VANTAGE_API_URL` - Backend API URL (default: http://localhost:8000)
+- `LLM_PROVIDER` - "vllm" or "claude" (default: vllm)
 - `VLLM_URL` - vLLM server URL (default: http://10.0.8.2:8003/v1/chat/completions)
+- `ANTHROPIC_API_KEY` - Required when LLM_PROVIDER=claude
 - `DEFAULT_PROJECT_SLUG` - Default project (default: demo-project)
 
 ### 3. Start Services
@@ -78,9 +80,6 @@ python3 gateway.py
 # Check backend health
 curl http://localhost:8000/api/health
 
-# Check vLLM server
-curl http://10.0.8.2:8003/v1/models
-
 # Test bot in Telegram
 # Send message: "What's due today?"
 ```
@@ -97,8 +96,6 @@ Ask about tasks, deliverables, requirements, or team members:
 "Get requirement 12"
 "Who is team member 3?"
 ```
-
-Bot will read enriched context and report full details.
 
 ### Task Completion
 
@@ -143,7 +140,7 @@ The gateway supports these tools:
 - `get_project_stats` - Get project statistics
 - `delete_project` - Delete project
 
-All tools execute Python scripts from the OpenClaw skills directory.
+All tools execute Python scripts from the Vantage scripts directory.
 
 ## Troubleshooting
 
@@ -155,9 +152,6 @@ ps aux | grep gateway.py
 
 # Check TELEGRAM_BOT_TOKEN
 echo $TELEGRAM_BOT_TOKEN
-
-# Check vLLM server
-curl http://10.0.8.2:8003/v1/models
 
 # Check backend API
 curl http://localhost:8000/api/health
@@ -189,27 +183,14 @@ echo $DEFAULT_PROJECT_SLUG
 ### File uploads not working
 
 ```bash
-# Check media inbox directory
-ls -la ~/.openclaw/media/inbound/
-
-# Verify file permissions
-stat ~/.openclaw/media/inbound/
+# Check uploads directory
+ls -la /Users/tom/Projects/OSAP/Vantage/backend/data/uploads/
 
 # Check complete_task.py can find files
 python3 /path/to/scripts/complete_task.py 4
 ```
 
 ## Development
-
-### Running Tests
-
-```bash
-# Unit tests for tools
-python3 -m pytest tests/test_tools.py
-
-# Integration tests for gateway
-python3 -m pytest tests/test_gateway.py
-```
 
 ### Adding New Tools
 
@@ -228,34 +209,9 @@ python3 gateway.py
 ```
 
 View detailed logs:
-- vLLM request/response payloads
+- LLM request/response payloads
 - Tool execution commands and results
 - Message processing flow
-
-## Migration from OpenClaw
-
-See [MIGRATION_GUIDE.md](../Vantage/MIGRATION_GUIDE.md) for complete migration documentation.
-
-Key differences:
-- ✅ Direct control over LLM interactions
-- ✅ Proper tool execution (no skill system issues)
-- ✅ Full transparency with logging
-- ✅ Easy to add new tools
-- ✅ No framework patches to maintain
-
-What ported over:
-- ✅ Backend API (unchanged)
-- ✅ All Python scripts (unchanged)
-- ✅ Behavior rules (converted to system prompt)
-- ✅ Tool definitions (converted to OpenAI format)
-
-## Support
-
-For issues or questions:
-- Check troubleshooting section above
-- Review logs with DEBUG level
-- Verify all services are running
-- Test components independently (backend, vLLM, scripts)
 
 ## License
 
