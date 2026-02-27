@@ -1,7 +1,6 @@
 #!/usr/bin/env python3
 """Custom Telegram Gateway for Vantage Bot"""
 import asyncio
-import json
 import logging
 import re
 from pathlib import Path
@@ -11,25 +10,13 @@ import httpx
 
 from telegram import MenuButtonWebApp, WebAppInfo
 from config import (
-    TELEGRAM_TOKEN, VLLM_URL, BACKEND_API, DEFAULT_PROJECT,
-    MEDIA_INBOX, VLLM_MODEL, MODEL_TEMPERATURE, MODEL_MAX_TOKENS, LOG_LEVEL,
-    LLM_PROVIDER, ANTHROPIC_API_KEY, CLAUDE_MODEL, WEBAPP_URL,
+    TELEGRAM_TOKEN, BACKEND_API,
+    MEDIA_INBOX, LOG_LEVEL, WEBAPP_URL,
+    INTERNAL_TOKEN,
 )
-from prompts import SYSTEM_PROMPT
-from tools import TOOLS, execute_tool
 from handlers import try_handle, handle_tasks_command, handle_projects_command, handle_stats_command
 from formatters import format_help, format_welcome, format_task_list, format_task_detail, format_project_stats
 from i18n import get_lang, t
-
-# Lazy-init Claude client (only when provider=claude)
-_claude_client = None
-
-def _get_claude_client():
-    global _claude_client
-    if _claude_client is None:
-        import anthropic
-        _claude_client = anthropic.AsyncAnthropic(api_key=ANTHROPIC_API_KEY)
-    return _claude_client
 
 # Setup logging
 logging.basicConfig(
@@ -37,6 +24,16 @@ logging.basicConfig(
     format='%(asctime)s - %(name)s - %(levelname)s - %(message)s'
 )
 logger = logging.getLogger(__name__)
+
+
+async def _record_activity(person_id: int) -> None:
+    """Fire-and-forget: bump last_active_at via backend."""
+    try:
+        headers = _backend_headers()
+        async with httpx.AsyncClient(timeout=5.0) as client:
+            await client.post(f"{BACKEND_API}/people/{person_id}/activity", headers=headers)
+    except Exception:
+        pass
 
 
 def _user_lang(update, person: dict | None = None) -> str:
@@ -111,27 +108,82 @@ async def verify_code(code: str, telegram_id: str) -> dict:
         return {"success": False, "message": "Could not reach verification service."}
 
 
-async def get_enriched_context(project_slug: str, person_id: int | None = None) -> str:
-    """Fetch enriched context from backend API, optionally scoped to a person."""
-    async with httpx.AsyncClient() as client:
-        try:
-            params = {}
-            if person_id:
-                params["person_id"] = person_id
-            response = await client.get(f"{BACKEND_API}/projects/{project_slug}/chat/context", params=params)
-            if response.status_code == 200:
-                return response.json().get("context", "")
-            else:
-                logger.warning(f"Failed to fetch context: {response.status_code}")
-                return ""
-        except Exception as e:
-            logger.error(f"Error fetching context: {e}")
-            return ""
+async def _get_person_projects(person_id: int) -> list[dict]:
+    """Fetch projects for a person from the backend."""
+    try:
+        async with httpx.AsyncClient(timeout=10.0) as client:
+            resp = await client.get(f"{BACKEND_API}/people/{person_id}/projects")
+            if resp.status_code == 200:
+                return resp.json()
+    except Exception as e:
+        logger.warning(f"Failed to fetch projects for person {person_id}: {e}")
+    return []
+
+
+async def _get_active_project(context: ContextTypes.DEFAULT_TYPE, person: dict | None) -> str | None:
+    """Get the active project slug for this user session.
+
+    Returns slug from user_data, or auto-selects if the user has exactly one project.
+    Returns None if no project could be determined.
+    """
+    # Check if already selected in this session
+    active = context.user_data.get("active_project")
+    if active:
+        return active["slug"]
+
+    # Auto-resolve from person's memberships
+    if not person or not person.get("id"):
+        return None
+
+    projects = await _get_person_projects(person["id"])
+    if len(projects) == 1:
+        context.user_data["active_project"] = {
+            "slug": projects[0]["slug"],
+            "name": projects[0]["name"],
+        }
+        return projects[0]["slug"]
+
+    return None
+
+
+async def _ensure_project_or_prompt(
+    update: Update, context: ContextTypes.DEFAULT_TYPE, person: dict | None, lang: str,
+) -> str | None:
+    """Ensure the user has an active project. If multiple projects exist and none is
+    selected, show a project selector keyboard and return None.
+    Returns the project slug if available.
+    """
+    slug = await _get_active_project(context, person)
+    if slug:
+        return slug
+
+    # No project auto-selected — need to show selector
+    if not person or not person.get("id"):
+        return None
+
+    projects = await _get_person_projects(person["id"])
+    if not projects:
+        await update.message.reply_text(t("no_projects", lang))
+        return None
+
+    # Multiple projects — show inline keyboard selector
+    buttons = []
+    for p in projects:
+        buttons.append([InlineKeyboardButton(
+            p["name"], callback_data=f"select_project:{p['slug']}:{p['name'][:30]}"
+        )])
+    await update.message.reply_text(
+        t("select_project", lang),
+        reply_markup=InlineKeyboardMarkup(buttons),
+    )
+    return None
 
 
 async def persist_messages(project_slug: str, user_id: str, user_msg: str, assistant_msg: str):
-    """Save messages to backend DB — single source of truth for all channels."""
+    """Save messages to backend DB. Used by intent fast-path handlers only.
+    The main chat flow persists messages via the backend chat endpoint."""
     try:
+        headers = _backend_headers()
         async with httpx.AsyncClient(timeout=10.0) as client:
             await client.post(
                 f"{BACKEND_API}/projects/{project_slug}/chat/messages",
@@ -142,189 +194,28 @@ async def persist_messages(project_slug: str, user_id: str, user_msg: str, assis
                         {"role": "assistant", "content": assistant_msg},
                     ],
                 },
+                headers=headers,
             )
             logger.debug(f"Persisted messages for user {user_id}")
     except Exception as e:
         logger.warning(f"Failed to persist messages: {e}")
 
 
-async def get_chat_history(project_slug: str, user_id: str) -> list[dict]:
-    """Fetch conversation history from backend DB (single source of truth)."""
-    try:
-        async with httpx.AsyncClient(timeout=10.0) as client:
-            response = await client.get(
-                f"{BACKEND_API}/projects/{project_slug}/chat",
-                params={"user_id": user_id, "limit": 20},
-            )
-            if response.status_code == 200:
-                messages = response.json()
-                # Convert DB format to OpenAI message format
-                return [{"role": m["role"], "content": m["content"]} for m in messages]
-            else:
-                logger.warning(f"Failed to fetch history: {response.status_code}")
-                return []
-    except Exception as e:
-        logger.warning(f"Error fetching history: {e}")
-        return []
-
-
-async def call_llm(messages: list, tools: list = None) -> dict:
-    """Call configured LLM provider. Messages are in OpenAI format.
-    Returns normalized dict: {"content": str|None, "tool_calls": list|None}
-    where tool_calls match OpenAI format: [{"id": str, "function": {"name": str, "arguments": str}}]
-    """
-    if LLM_PROVIDER == "claude":
-        return await _call_claude(messages, tools)
-    else:
-        return await _call_vllm(messages, tools)
-
-
-async def _call_vllm(messages: list, tools: list = None) -> dict:
-    """Call vLLM server with messages and optional tools"""
-    payload = {
-        "model": VLLM_MODEL,
-        "messages": messages,
-        "temperature": MODEL_TEMPERATURE,
-        "max_tokens": MODEL_MAX_TOKENS
-    }
-
-    if tools:
-        payload["tools"] = tools
-        payload["tool_choice"] = "auto"
-
-    logger.debug(f"Calling vLLM with {len(messages)} messages and {len(tools) if tools else 0} tools")
-
-    async with httpx.AsyncClient(timeout=120.0) as client:
-        try:
-            response = await client.post(VLLM_URL, json=payload)
-            response.raise_for_status()
-            result = response.json()
-            logger.debug(f"vLLM response: {json.dumps(result, indent=2)}")
-            msg = result["choices"][0]["message"]
-            return {"content": msg.get("content"), "tool_calls": msg.get("tool_calls")}
-        except Exception as e:
-            logger.error(f"vLLM call failed: {e}")
-            raise
-
-
-def _convert_tools_for_claude(tools: list) -> list:
-    """Convert OpenAI tool format to Claude tool format."""
-    return [
-        {
-            "name": t["function"]["name"],
-            "description": t["function"]["description"],
-            "input_schema": t["function"]["parameters"],
-        }
-        for t in tools
-    ]
-
-
-def _convert_messages_for_claude(messages: list) -> tuple[str, list]:
-    """Convert OpenAI-format messages to Claude format.
-    Returns (system_prompt, claude_messages).
-    """
-    system_parts = []
-    claude_messages = []
-
-    for msg in messages:
-        role = msg["role"]
-
-        if role == "system":
-            system_parts.append(msg["content"])
-
-        elif role == "user":
-            claude_messages.append({"role": "user", "content": msg["content"]})
-
-        elif role == "assistant":
-            if msg.get("tool_calls"):
-                # Convert tool_calls to Claude tool_use content blocks
-                content_blocks = []
-                if msg.get("content"):
-                    content_blocks.append({"type": "text", "text": msg["content"]})
-                for tc in msg["tool_calls"]:
-                    args = tc["function"]["arguments"]
-                    content_blocks.append({
-                        "type": "tool_use",
-                        "id": tc["id"],
-                        "name": tc["function"]["name"],
-                        "input": json.loads(args) if isinstance(args, str) else args,
-                    })
-                claude_messages.append({"role": "assistant", "content": content_blocks})
-            else:
-                claude_messages.append({"role": "assistant", "content": msg.get("content", "")})
-
-        elif role == "tool":
-            # Claude expects tool_result blocks inside a user message.
-            # Group consecutive tool results together.
-            tool_result_block = {
-                "type": "tool_result",
-                "tool_use_id": msg["tool_call_id"],
-                "content": msg["content"],
-            }
-            # If the last claude message is already a user message with tool_results, append
-            if (claude_messages and claude_messages[-1]["role"] == "user"
-                    and isinstance(claude_messages[-1]["content"], list)):
-                claude_messages[-1]["content"].append(tool_result_block)
-            else:
-                claude_messages.append({"role": "user", "content": [tool_result_block]})
-
-    return "\n\n".join(system_parts), claude_messages
-
-
-async def _call_claude(messages: list, tools: list = None) -> dict:
-    """Call Claude API with messages and optional tools."""
-    client = _get_claude_client()
-    system_prompt, claude_messages = _convert_messages_for_claude(messages)
-    claude_tools = _convert_tools_for_claude(tools) if tools else []
-
-    logger.debug(f"Calling Claude ({CLAUDE_MODEL}) with {len(claude_messages)} messages and {len(claude_tools)} tools")
-
-    kwargs = {
-        "model": CLAUDE_MODEL,
-        "max_tokens": MODEL_MAX_TOKENS,
-        "system": system_prompt,
-        "messages": claude_messages,
-        "temperature": MODEL_TEMPERATURE,
-    }
-    if claude_tools:
-        kwargs["tools"] = claude_tools
-
-    try:
-        response = await client.messages.create(**kwargs)
-        logger.debug(f"Claude response stop_reason={response.stop_reason}")
-
-        # Convert Claude response to normalized format
-        text_parts = []
-        tool_calls = []
-        for block in response.content:
-            if block.type == "text":
-                text_parts.append(block.text)
-            elif block.type == "tool_use":
-                tool_calls.append({
-                    "id": block.id,
-                    "type": "function",
-                    "function": {
-                        "name": block.name,
-                        "arguments": json.dumps(block.input),
-                    }
-                })
-
-        return {
-            "content": "\n".join(text_parts) if text_parts else None,
-            "tool_calls": tool_calls if tool_calls else None,
-        }
-    except Exception as e:
-        logger.error(f"Claude call failed: {e}")
-        raise
+def _backend_headers(person_id: int | None = None) -> dict:
+    """Build common headers for backend API calls."""
+    headers: dict[str, str] = {"Content-Type": "application/json"}
+    if INTERNAL_TOKEN:
+        headers["X-Internal-Token"] = INTERNAL_TOKEN
+    if person_id:
+        headers["X-Person-Id"] = str(person_id)
+    return headers
 
 
 def strip_think_tags(text: str) -> str:
     """Remove <think> tags and their contents from text"""
     if not text:
         return ""
-    # Remove everything from <think> to </think>
     text = re.sub(r'<think>.*?</think>', '', text, flags=re.DOTALL)
-    # Clean up any remaining stray tags
     text = re.sub(r'</?think>', '', text)
     return text.strip()
 
@@ -357,46 +248,6 @@ class _SyntheticUpdate:
         self.effective_chat = effective_chat
         self.effective_user = effective_user
         self._synthetic_text = text
-
-
-def _collect_template_actions(tool_result: dict, arguments: dict,
-                              pending_files: list, reply_buttons: list):
-    """Extract template files and buttons from get_report_template results.
-
-    Modifies tool_result in-place to replace local paths/URLs with a delivery
-    note so the LLM doesn't leak filesystem info to the user.
-    """
-    filename = tool_result.get("template_file", "template.pdf")
-
-    # Prefer blank template (fillable form) over original
-    file_path = None
-    if tool_result.get("has_blank") and tool_result.get("blank_template_path"):
-        file_path = tool_result["blank_template_path"]
-        stem = Path(filename).stem
-        filename = f"{stem}_blank.pdf"
-    elif tool_result.get("template_path"):
-        file_path = tool_result["template_path"]
-
-    if file_path and Path(file_path).is_file():
-        pending_files.append((file_path, filename))
-        # Replace paths/URLs with delivery note for the LLM
-        for key in ("template_path", "blank_template_path",
-                     "template_download_url", "blank_download_url"):
-            tool_result.pop(key, None)
-        tool_result["file_delivery"] = (
-            f"The template file '{filename}' will be sent as a document in chat automatically. "
-            "Do NOT include any download URLs or file paths in your response."
-        )
-
-    # Add "Fill in via Chat" button if template has fields (tool-level fallback)
-    if tool_result.get("template_fields"):
-        report_id = arguments.get("report_id")
-        reply_buttons.append([
-            InlineKeyboardButton(
-                "\U0001f4dd Fill in via Chat",
-                callback_data=f"fill_report:{report_id}",
-            )
-        ])
 
 
 def _parse_buttons(text: str) -> tuple[str, list[list[InlineKeyboardButton]]]:
@@ -467,6 +318,10 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
         lang = _user_lang(update, person)
 
+        # Track activity (fire-and-forget)
+        if person and person.get("id"):
+            asyncio.create_task(_record_activity(person["id"]))
+
         # --- Verification gate (skip for synthetic updates from callbacks) ---
         if not is_synthetic and not _is_verified(person):
             await update.message.reply_text(t("verify_prompt", lang), parse_mode="HTML")
@@ -477,11 +332,21 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
         if pending and pending.get("type") == "set_due_date":
             user_message = f"Update the due date for task {pending['task_id']} to {user_message}"
 
+        # --- Resolve active project (per-user, session-scoped) ---
+        if not is_synthetic:
+            project_slug = await _ensure_project_or_prompt(update, context, person, lang)
+            if not project_slug:
+                return  # project selector shown, wait for callback
+        else:
+            project_slug = await _get_active_project(context, person)
+            if not project_slug:
+                return
+
         # --- Handler chain: classify intent and handle common actions directly ---
         # Skip for synthetic updates (callbacks) and messages with documents
         has_document = hasattr(update.message, 'document') and update.message.document
         if not is_synthetic and not has_document:
-            handler_result = await try_handle(user_message, person, DEFAULT_PROJECT, lang=lang)
+            handler_result = await try_handle(user_message, person, project_slug, lang=lang)
             if handler_result is not None:
                 reply_text, buttons = handler_result
                 reply_markup = InlineKeyboardMarkup(buttons) if buttons else None
@@ -489,128 +354,79 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
                     reply_text, parse_mode="HTML", reply_markup=reply_markup,
                 )
                 logger.info(f"Handler chain responded: {reply_text[:100]}...")
-                asyncio.create_task(persist_messages(DEFAULT_PROJECT, user_id, user_message, reply_text))
+                asyncio.create_task(persist_messages(project_slug, user_id, user_message, reply_text))
                 return
 
-        # --- Full agentic LLM loop (fallback for complex/ambiguous messages) ---
-
-        # Get enriched context from backend (scoped to this person's role)
+        # --- Route through backend chat endpoint (unified LLM orchestration) ---
         person_db_id = person.get("id") if person else None
-        enriched_context = await get_enriched_context(DEFAULT_PROJECT, person_id=person_db_id)
 
-        # Fetch conversation history from DB (single source of truth)
-        history = await get_chat_history(DEFAULT_PROJECT, user_id)
+        # Build request payload
+        chat_payload = {
+            "message": user_message,
+            "user_id": user_id,
+            "person_id": person_db_id,
+            "source": "telegram",
+        }
 
-        # Build message history with enriched context and conversation history
-        messages = [
-            {"role": "system", "content": SYSTEM_PROMPT},
-            {"role": "system", "content": f"PROJECT CONTEXT:\n{enriched_context}"},
-        ]
+        # Include attachment info if file was recently uploaded
+        upload_info = context.user_data.get("last_upload")
+        if upload_info:
+            chat_payload["attachment"] = {
+                "filename": upload_info["filename"],
+                "url": f"/uploads/{upload_info['filename']}",
+                "size": upload_info.get("size", "unknown"),
+            }
 
-        # Add conversation history (last 10 messages to avoid context overflow)
-        messages.extend(history[-10:])
+        headers = _backend_headers(person_id=person_db_id)
+        async with httpx.AsyncClient(timeout=180.0) as client:
+            response = await client.post(
+                f"{BACKEND_API}/projects/{project_slug}/chat",
+                json=chat_payload,
+                headers=headers,
+            )
 
-        # Add current user message
-        messages.append({"role": "user", "content": user_message})
+        if response.status_code != 200:
+            logger.error(f"Backend chat failed: {response.status_code} {response.text[:300]}")
+            await update.message.reply_text(t("error_generic", lang))
+            return
 
-        # Call LLM with tools - loop until we get text response
-        max_iterations = 5  # Prevent infinite loops
-        iteration = 0
-        final_message = None
-        pending_files = []   # [(local_path, filename)] to send after reply
-        reply_buttons = []   # [[InlineKeyboardButton, ...]] for inline keyboard
+        result = response.json()
+        final_message = result.get("response", "")
+        backend_files = result.get("files") or []
 
-        while iteration < max_iterations:
-            result = await call_llm(messages, TOOLS)
-
-            if result.get("tool_calls"):
-                # Execute each tool call
-                logger.info(f"LLM requested {len(result['tool_calls'])} tool calls (iteration {iteration + 1})")
-
-                # Append assistant message (with tool_calls) in OpenAI format
-                messages.append({
-                    "role": "assistant",
-                    "content": result.get("content"),
-                    "tool_calls": result["tool_calls"],
-                })
-
-                for tool_call in result["tool_calls"]:
-                    tool_name = tool_call["function"]["name"]
-                    arguments = json.loads(tool_call["function"]["arguments"])
-
-                    # Inject requester context for request_action
-                    if tool_name == "request_action" and person:
-                        arguments["requester_id"] = person["id"]
-
-                    logger.info(f"Executing tool: {tool_name} with args: {arguments}")
-
-                    # Execute tool (pass actor for activity logging)
-                    actor_name = person.get("name") if person else None
-                    tool_result = execute_tool(tool_name, arguments, actor=actor_name)
-                    logger.info(f"Tool result: {tool_result}")
-
-                    # Intercept get_report_template for file delivery + buttons
-                    if (tool_name == "get_report_template"
-                            and isinstance(tool_result, dict)
-                            and tool_result.get("success")):
-                        _collect_template_actions(
-                            tool_result, arguments, pending_files, reply_buttons,
-                        )
-
-                    # Add tool result to messages
-                    messages.append({
-                        "role": "tool",
-                        "tool_call_id": tool_call["id"],
-                        "name": tool_name,
-                        "content": json.dumps(tool_result)
-                    })
-
-                # Continue loop to call LLM again
-                await context.bot.send_chat_action(chat_id=chat_id, action="typing")
-                iteration += 1
-            else:
-                # No more tool calls, we have final response
-                final_message = result.get("content", "")
-                break
-
-        if not final_message:
-            logger.warning(f"No text response after {iteration} iterations")
-            final_message = "I executed the tools but couldn't generate a response."
-
-        # Strip <think> tags if present
+        # Strip any remaining think tags (safety net)
         final_message = strip_think_tags(final_message)
 
         if not final_message or final_message.isspace():
             final_message = "I processed your request but have no response to show."
-            logger.warning("Empty response after stripping think tags")
 
-        # Clean up LLM markdown for Telegram HTML display
+        # Convert markdown to Telegram HTML
         final_message = _md_to_html(final_message)
 
-        # Extract LLM-specified buttons from response text
+        # Extract [BUTTONS]...[/BUTTONS] and create InlineKeyboard
         final_message, llm_buttons = _parse_buttons(final_message)
 
-        # LLM buttons take precedence; tool-level buttons are a fallback
-        all_buttons = llm_buttons if llm_buttons else reply_buttons
-        reply_markup = InlineKeyboardMarkup(all_buttons) if all_buttons else None
+        reply_markup = InlineKeyboardMarkup(llm_buttons) if llm_buttons else None
         await update.message.reply_text(
             final_message, parse_mode="HTML", reply_markup=reply_markup,
         )
         logger.info(f"Sent response: {final_message[:100]}...")
 
-        # Send pending files as Telegram documents
-        for file_path, filename in pending_files:
+        # Send any files returned by backend (e.g., report templates)
+        for file_info in backend_files:
             try:
-                with open(file_path, "rb") as f:
+                fpath = file_info["path"]
+                fname = file_info["filename"]
+                with open(fpath, "rb") as f:
                     await context.bot.send_document(
-                        chat_id=chat_id, document=f, filename=filename,
+                        chat_id=chat_id, document=f, filename=fname,
                     )
-                logger.info(f"Sent template file: {filename}")
+                logger.info(f"Sent file: {fname}")
             except Exception as e:
-                logger.error(f"Failed to send file {filename}: {e}")
+                logger.error(f"Failed to send file {file_info.get('filename')}: {e}")
 
-        # Persist to backend DB (single source of truth for all channels)
-        asyncio.create_task(persist_messages(DEFAULT_PROJECT, user_id, user_message, final_message))
+        # Clear upload info after it's been used
+        context.user_data.pop("last_upload", None)
 
     except Exception as e:
         error_msg = f"Error processing message: {str(e)}"
@@ -642,10 +458,20 @@ async def handle_document(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
         logger.info(f"Saved file to: {file_path}")
 
-        # Store file info in user context for LLM to access
+        # Store file info in user context for backend attachment
+        file_size = document.file_size
+        if file_size and file_size > 1024 * 1024:
+            size_str = f"{file_size / 1024 / 1024:.1f} MB"
+        elif file_size and file_size > 1024:
+            size_str = f"{file_size / 1024:.0f} KB"
+        elif file_size:
+            size_str = f"{file_size} B"
+        else:
+            size_str = "unknown"
         context.user_data['last_upload'] = {
             'filename': document.file_name,
             'path': str(file_path),
+            'size': size_str,
             'timestamp': update.message.date.isoformat()
         }
 
@@ -732,33 +558,15 @@ async def handle_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
         )
 
     if data.startswith("get_template:"):
-        # Direct file delivery — no LLM round-trip needed
-        report_id = int(data.split(":")[1])
-        actor_name = person.get("name") if person else None
-        tool_result = execute_tool("get_report_template", {"report_id": report_id}, actor=actor_name)
-        if isinstance(tool_result, dict) and tool_result.get("success"):
-            filename = tool_result.get("template_file", "template.pdf")
-            file_path = None
-            if tool_result.get("has_blank") and tool_result.get("blank_template_path"):
-                file_path = tool_result["blank_template_path"]
-                stem = Path(filename).stem
-                filename = f"{stem}_blank.pdf"
-            elif tool_result.get("template_path"):
-                file_path = tool_result["template_path"]
-
-            if file_path and Path(file_path).is_file():
-                try:
-                    with open(file_path, "rb") as f:
-                        await context.bot.send_document(
-                            chat_id=chat_id, document=f, filename=filename,
-                        )
-                except Exception as e:
-                    logger.error(f"Failed to send template: {e}")
-                    await query.message.reply_text("Failed to send template file.")
-            else:
-                await query.message.reply_text("Template file not found.")
-        else:
-            await query.message.reply_text("Could not fetch template info.")
+        # Route through backend chat as a synthetic message for consistency
+        report_id = data.split(":")[1]
+        synthetic = _SyntheticUpdate(
+            message=query.message,
+            effective_chat=query.message.chat,
+            effective_user=query.from_user,
+            text=f"Send me the template for report {report_id}",
+        )
+        await handle_message(synthetic, context)
 
     elif data.startswith("fill_report:"):
         report_id = data.split(":")[1]
@@ -898,15 +706,17 @@ async def handle_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
         reply_markup = InlineKeyboardMarkup(buttons) if buttons else None
         await query.message.reply_text(text, parse_mode="HTML", reply_markup=reply_markup)
         cb_uid = f"person-{person['id']}" if person else tg_id
-        asyncio.create_task(persist_messages(DEFAULT_PROJECT, cb_uid, f"[Viewed task #{task_id}]", text))
+        cb_slug = await _get_active_project(context, person) or "unknown"
+        asyncio.create_task(persist_messages(cb_slug, cb_uid, f"[Viewed task #{task_id}]", text))
 
     elif data.startswith("cmd:"):
         # Button-triggered commands (e.g. from help screen)
         cmd = data.split(":", 1)[1]
+        cb_slug = await _get_active_project(context, person) or "unknown"
         if cmd == "tasks":
-            text, buttons = await handle_tasks_command(person, DEFAULT_PROJECT, lang=lang)
+            text, buttons = await handle_tasks_command(person, cb_slug, lang=lang)
         elif cmd == "stats":
-            text, buttons = await handle_stats_command(person, DEFAULT_PROJECT, lang=lang)
+            text, buttons = await handle_stats_command(person, cb_slug, lang=lang)
         elif cmd == "help":
             text, buttons = format_help(lang=lang)
         else:
@@ -914,7 +724,16 @@ async def handle_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
         reply_markup = InlineKeyboardMarkup(buttons) if buttons else None
         await query.message.reply_text(text, parse_mode="HTML", reply_markup=reply_markup)
         cb_uid = f"person-{person['id']}" if person else tg_id
-        asyncio.create_task(persist_messages(DEFAULT_PROJECT, cb_uid, f"[/{cmd}]", text))
+        asyncio.create_task(persist_messages(cb_slug, cb_uid, f"[/{cmd}]", text))
+
+    elif data.startswith("select_project:"):
+        parts = data.split(":", 2)
+        slug = parts[1] if len(parts) > 1 else ""
+        name = parts[2] if len(parts) > 2 else slug
+        context.user_data["active_project"] = {"slug": slug, "name": name}
+        await query.message.reply_text(
+            t("project_selected", lang, name=name), parse_mode="HTML",
+        )
 
     else:
         logger.warning(f"Unknown callback data: {data}")
@@ -974,8 +793,8 @@ async def handle_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
             else:
                 # /start (no code) — check if already verified
                 if _is_verified(person):
-                    projects = execute_tool("get_projects", {}, actor=person.get("name") if person else None)
-                    text, buttons = format_welcome(projects if isinstance(projects, list) else [], lang=lang)
+                    person_projects = await _get_person_projects(person["id"]) if person and person.get("id") else []
+                    text, buttons = format_welcome(person_projects, lang=lang)
                 else:
                     text = (
                         f"{t('welcome_title', lang)}\n\n"
@@ -987,7 +806,8 @@ async def handle_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
             await update.message.reply_text(text, parse_mode="HTML", reply_markup=reply_markup)
 
             user_id = f"person-{person['id']}" if person else tg_id
-            asyncio.create_task(persist_messages(DEFAULT_PROJECT, user_id, f"/start {' '.join(args)}".strip(), text))
+            cmd_slug = await _get_active_project(context, person) or "unknown"
+            asyncio.create_task(persist_messages(cmd_slug, user_id, f"/start {' '.join(args)}".strip(), text))
             return
 
         # --- Verification gate for all other commands ---
@@ -996,21 +816,35 @@ async def handle_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
             return
 
         user_id = f"person-{person['id']}" if person else tg_id
+        cmd_slug = await _get_active_project(context, person) or "unknown"
 
         if command == "help":
             text, buttons = format_help(lang=lang)
         elif command == "tasks":
-            text, buttons = await handle_tasks_command(person, DEFAULT_PROJECT, lang=lang)
+            text, buttons = await handle_tasks_command(person, cmd_slug, lang=lang)
         elif command == "projects":
             text, buttons = await handle_projects_command(person, lang=lang)
         elif command == "stats":
-            text, buttons = await handle_stats_command(person, DEFAULT_PROJECT, lang=lang)
+            text, buttons = await handle_stats_command(person, cmd_slug, lang=lang)
+        elif command == "switch":
+            # Show project selector
+            projects = await _get_person_projects(person["id"]) if person else []
+            if not projects:
+                text, buttons = t("no_projects", lang), []
+            else:
+                btns = [[InlineKeyboardButton(
+                    p["name"], callback_data=f"select_project:{p['slug']}:{p['name'][:30]}"
+                )] for p in projects]
+                await update.message.reply_text(
+                    t("select_project", lang), reply_markup=InlineKeyboardMarkup(btns),
+                )
+                return
         else:
             text, buttons = f"Unknown command: /{command}", []
 
         reply_markup = InlineKeyboardMarkup(buttons) if buttons else None
         await update.message.reply_text(text, parse_mode="HTML", reply_markup=reply_markup)
-        asyncio.create_task(persist_messages(DEFAULT_PROJECT, user_id, f"/{command}", text))
+        asyncio.create_task(persist_messages(cmd_slug, user_id, f"/{command}", text))
 
     except Exception as e:
         logger.error(f"Error handling /{command}: {e}", exc_info=True)
@@ -1047,15 +881,9 @@ async def handle_webapp_command(update: Update, context: ContextTypes.DEFAULT_TY
 
 def main():
     """Start the bot"""
-    logger.info("Starting Vantage Telegram Gateway...")
-    logger.info(f"LLM provider: {LLM_PROVIDER}")
-    if LLM_PROVIDER == "claude":
-        logger.info(f"Claude model: {CLAUDE_MODEL}")
-    else:
-        logger.info(f"vLLM model: {VLLM_MODEL}")
-        logger.info(f"vLLM URL: {VLLM_URL}")
+    logger.info("Starting Vantage Telegram Gateway (unified backend mode)...")
     logger.info(f"Backend API: {BACKEND_API}")
-    logger.info(f"Default project: {DEFAULT_PROJECT}")
+    logger.info("LLM orchestration delegated to backend chat endpoint")
 
     # Set mini app menu button on startup
     async def post_init(app):
@@ -1078,7 +906,7 @@ def main():
     application = builder.build()
 
     # Add handlers — command handlers first (most specific), then text, then documents
-    application.add_handler(CommandHandler(["start", "help", "tasks", "projects", "stats", "lang"], handle_command))
+    application.add_handler(CommandHandler(["start", "help", "tasks", "projects", "stats", "lang", "switch"], handle_command))
     application.add_handler(CommandHandler("open", handle_open_command))
     application.add_handler(CommandHandler("webapp", handle_webapp_command))
     application.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, handle_message))
