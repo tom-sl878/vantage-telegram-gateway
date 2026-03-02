@@ -530,6 +530,11 @@ DICT: dict[str, dict[str, str]] = {
         "ko": "검토를 위해 제출되었습니다. 보고서 담당자에게 알림이 전송됩니다.",
         "vi": "Đã nộp để xét duyệt. Người phụ trách báo cáo sẽ được thông báo.",
     },
+    "task_force_submitted": {
+        "en": "Submitted for review (override). The report owner will be notified that you submitted despite the AI recommendation.",
+        "ko": "검토를 위해 제출됨 (재정). AI 권고에도 불구하고 제출했음을 보고서 담당자에게 알립니다.",
+        "vi": "Đã nộp để xét duyệt (ghi đè). Người phụ trách sẽ được thông báo rằng bạn đã nộp bất chấp khuyến nghị AI.",
+    },
     "btn_full_guide": {
         "en": "Full Guide",
         "ko": "전체 가이드",

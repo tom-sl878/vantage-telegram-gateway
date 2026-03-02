@@ -332,6 +332,25 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
         if pending and pending.get("type") == "set_due_date":
             user_message = f"Update the due date for task {pending['task_id']} to {user_message}"
 
+        # --- Force-submit: submitter wants to push through despite AI rejection ---
+        pending_sub = context.user_data.get("pending_submission")
+        if pending_sub and not is_synthetic:
+            msg_lower = user_message.lower() if user_message else ""
+            force_phrases = [
+                "submit anyway", "submit it anyway", "force submit",
+                "send it anyway", "send anyway", "push through",
+                "submit this document", "submit the document",
+                "submit regardless", "override", "go ahead",
+                "ยื่นเลย", "제출", "提交",
+            ]
+            if any(phrase in msg_lower for phrase in force_phrases):
+                sub = context.user_data.pop("pending_submission")
+                task_id = sub["task_id"]
+                task_title = sub["task_title"]
+                logger.info(f"Force-submit for task {task_id} by person {person.get('id') if person else 'unknown'}")
+                await _complete_task_direct(task_id, chat_id, person, context, lang, force_submit=True)
+                return
+
         # --- Resolve active project (per-user, session-scoped) ---
         if not is_synthetic:
             project_slug = await _ensure_project_or_prompt(update, context, person, lang)
@@ -597,6 +616,15 @@ async def _download_and_forward(
                         text, parse_mode="HTML",
                         reply_markup=InlineKeyboardMarkup(buttons),
                     )
+                    # Store pending submission so user can force-submit via text
+                    recommendation = analysis.get("recommendation", "")
+                    if recommendation in ("reject", "accept_with_notes"):
+                        context.user_data["pending_submission"] = {
+                            "task_id": active_task_id,
+                            "task_title": active_task_title,
+                            "recommendation": recommendation,
+                        }
+
                     logger.info(f"File {filename} submitted for task {active_task_id}")
                     return
                 else:
@@ -654,10 +682,11 @@ async def handle_photo(update: Update, context: ContextTypes.DEFAULT_TYPE):
     )
 
 
-async def _complete_task_direct(task_id: str, chat_id: int, person: dict | None, context, lang: str):
+async def _complete_task_direct(task_id: str, chat_id: int, person: dict | None, context, lang: str, force_submit: bool = False):
     """Complete a task directly via backend API (not via LLM).
 
     Report tasks go to 'in_review' instead of 'complete' so the owner can review.
+    If force_submit=True, the submitter overrode the AI recommendation.
     """
     headers = _backend_headers(person_id=person.get("id") if person else None)
     try:
@@ -670,16 +699,31 @@ async def _complete_task_direct(task_id: str, chat_id: int, person: dict | None,
             task_data = task_resp.json() if task_resp.status_code == 200 else {}
             new_status = "in_review" if task_data.get("source") == "reporting" else "complete"
 
+            # If force-submit, update ai_analysis to flag the override
+            patch_body = {"status": new_status}
+            if force_submit and task_data.get("ai_analysis"):
+                try:
+                    import json as _json
+                    analysis = _json.loads(task_data["ai_analysis"])
+                    analysis["force_submitted"] = True
+                    analysis["force_submitted_by"] = person.get("name", "Unknown") if person else "Unknown"
+                    patch_body["ai_analysis"] = _json.dumps(analysis)
+                except (ValueError, TypeError):
+                    pass
+
             resp = await client.patch(
                 f"{BACKEND_API}/tasks/{task_id}",
-                json={"status": new_status},
+                json=patch_body,
                 headers=headers,
             )
         if resp.status_code == 200:
             task = resp.json()
             title = task.get("title", f"Task #{task_id}")
             if new_status == "in_review":
-                text = f"📋 <b>{title}</b>\n{t('task_submitted_review', lang)}"
+                if force_submit:
+                    text = f"📋 <b>{title}</b>\n{t('task_force_submitted', lang)}"
+                else:
+                    text = f"📋 <b>{title}</b>\n{t('task_submitted_review', lang)}"
             else:
                 text = f"✅ <b>{title}</b>\n{t('task_completed', lang)}"
             await context.bot.send_message(
@@ -689,6 +733,7 @@ async def _complete_task_direct(task_id: str, chat_id: int, person: dict | None,
             )
             context.user_data.pop("active_task_id", None)
             context.user_data.pop("active_task_title", None)
+            context.user_data.pop("pending_submission", None)
             logger.info(f"Task {task_id} set to {new_status} via direct API")
         else:
             detail = resp.json().get("detail", "Unknown error") if resp.headers.get("content-type", "").startswith("application/json") else resp.text[:200]
@@ -901,6 +946,7 @@ async def handle_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
         await _complete_task_direct(task_id, chat_id, person, context, lang)
 
     elif data == "dismiss":
+        context.user_data.pop("pending_submission", None)
         await query.message.reply_text(t("action_cancelled", lang), parse_mode="HTML")
 
     elif data.startswith("admin_set_due:"):

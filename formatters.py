@@ -221,6 +221,9 @@ def format_task_detail(
     if task.get("ai_analysis"):
         try:
             ai = json.loads(task["ai_analysis"])
+            if ai.get("force_submitted"):
+                submitter = ai.get("force_submitted_by", "Submitter")
+                lines.append(f"\n⚠️ <b>{submitter} overrode AI recommendation</b>")
             lines.append(f"\n<b>AI Analysis</b>")
             if ai.get("summary"):
                 lines.append(ai["summary"])
