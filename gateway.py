@@ -704,10 +704,26 @@ async def handle_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
     elif data.startswith("start_task:"):
         task_id = data.split(":")[1]
-        await handle_message(
-            _synth(f"Start working on task {task_id}, set status to in_progress"),
-            context,
-        )
+        headers = _backend_headers(person_id=person.get("id") if person else None)
+        try:
+            async with httpx.AsyncClient(timeout=10) as client:
+                resp = await client.patch(
+                    f"{BACKEND_API}/tasks/{task_id}",
+                    json={"status": "in_progress"},
+                    headers=headers,
+                )
+            if resp.status_code == 200:
+                task = resp.json()
+                title = task.get("title", f"Task #{task_id}")
+                await query.message.reply_text(
+                    f"▶️ <b>{title}</b>\n{t('task_started', lang)}",
+                    parse_mode="HTML",
+                )
+            else:
+                await query.message.reply_text(t("error_generic", lang))
+        except Exception as e:
+            logger.error(f"Failed to start task {task_id}: {e}")
+            await query.message.reply_text(t("error_generic", lang))
 
     elif data.startswith("complete_task:"):
         task_id = data.split(":")[1]
