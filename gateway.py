@@ -170,7 +170,7 @@ async def _ensure_project_or_prompt(
     buttons = []
     for p in projects:
         buttons.append([InlineKeyboardButton(
-            p["name"], callback_data=f"select_project:{p['slug']}:{p['name'][:30]}"
+            p["name"], callback_data=f"sp:{p['slug']}"
         )])
     await update.message.reply_text(
         t("select_project", lang),
@@ -434,9 +434,31 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
         await update.message.reply_text(t("error_generic", _user_lang(update)))
 
 
-async def handle_document(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    """Handle document uploads (PDFs, etc.)"""
-    # Verification gate
+def _human_size(byte_count: int | None) -> str:
+    """Format byte count as human-readable string."""
+    if byte_count and byte_count > 1024 * 1024:
+        return f"{byte_count / 1024 / 1024:.1f} MB"
+    if byte_count and byte_count > 1024:
+        return f"{byte_count / 1024:.0f} KB"
+    if byte_count:
+        return f"{byte_count} B"
+    return "unknown"
+
+
+async def _download_and_forward(
+    update: Update,
+    context: ContextTypes.DEFAULT_TYPE,
+    *,
+    file_id: str,
+    filename: str,
+    file_size: int | None,
+) -> None:
+    """Download a Telegram file, store metadata, and forward to unified chat.
+
+    Works for documents, photos, and any future media type.  All
+    intelligence (task matching, smart suggestions) lives in the backend
+    chat endpoint — the gateway just downloads and forwards.
+    """
     tg_id = str(update.effective_user.id)
     person = await resolve_person(tg_id, context)
     lang = _user_lang(update, person)
@@ -444,89 +466,63 @@ async def handle_document(update: Update, context: ContextTypes.DEFAULT_TYPE):
         await update.message.reply_text(t("verify_prompt", lang), parse_mode="HTML")
         return
 
-    chat_id = update.effective_chat.id
-    document = update.message.document
-
-    logger.info(f"Received document: {document.file_name}")
-
     try:
-        # Download file to media inbox
         MEDIA_INBOX.mkdir(parents=True, exist_ok=True)
-        file = await context.bot.get_file(document.file_id)
-        file_path = MEDIA_INBOX / document.file_name
+        file = await context.bot.get_file(file_id)
+        file_path = MEDIA_INBOX / filename
         await file.download_to_drive(file_path)
-
         logger.info(f"Saved file to: {file_path}")
 
-        # Store file info in user context for backend attachment
-        file_size = document.file_size
-        if file_size and file_size > 1024 * 1024:
-            size_str = f"{file_size / 1024 / 1024:.1f} MB"
-        elif file_size and file_size > 1024:
-            size_str = f"{file_size / 1024:.0f} KB"
-        elif file_size:
-            size_str = f"{file_size} B"
-        else:
-            size_str = "unknown"
+        # Store for handle_message → backend attachment payload
         context.user_data['last_upload'] = {
-            'filename': document.file_name,
+            'filename': filename,
             'path': str(file_path),
-            'size': size_str,
-            'timestamp': update.message.date.isoformat()
+            'size': _human_size(file_size),
+            'timestamp': update.message.date.isoformat(),
         }
 
-        # If user sent a caption, Telegram will call handle_message separately with it
-        # If no caption, check conversation history for task context
-        if not update.message.caption:
-            # Check if user was recently talking about a task
-            history = context.user_data.get('conversation_history', [])
-            recent_messages = ' '.join([msg.get('content', '') for msg in history[-4:]])  # Last 2 exchanges
+        # Caption or simple default — backend LLM has full context to handle it
+        text = update.message.caption or f"I uploaded a file: {filename}"
 
-            # Look for task mentions in recent conversation
-            import re
-            task_match = re.search(r'task (\d+)', recent_messages.lower())
-
-            if task_match:
-                task_id = task_match.group(1)
-                logger.info(f"Auto-detected task context: task {task_id}")
-
-                # Send confirmation and trigger analysis via handle_message
-                await update.message.reply_text(
-                    t("file_analyzing", lang, filename=document.file_name, task_id=task_id)
-                )
-
-                # Create a synthetic message to trigger the LLM with file context
-                synthetic_update = _SyntheticUpdate(
-                    message=update.message,
-                    effective_chat=update.effective_chat,
-                    effective_user=update.effective_user,
-                    text=f"Analyze this uploaded document for task {task_id}",
-                )
-                await handle_message(synthetic_update, context)
-            else:
-                # No task context — route through LLM for smart file analysis
-                logger.info(f"No task context for upload, routing through LLM for smart matching")
-                await update.message.reply_text(
-                    t("file_analyzing_smart", lang, filename=document.file_name)
-                )
-
-                synthetic_update = _SyntheticUpdate(
-                    message=update.message,
-                    effective_chat=update.effective_chat,
-                    effective_user=update.effective_user,
-                    text=(
-                        f"I just uploaded a file called '{document.file_name}' without specifying what it's for. "
-                        f"Please use the preview_file tool to look at its contents, then check my open tasks "
-                        f"and deliverables to suggest what this file might be for. "
-                        f"If you can identify a likely match, suggest it. Otherwise ask me what I'd like to do with it."
-                    ),
-                )
-                await handle_message(synthetic_update, context)
+        synthetic = _SyntheticUpdate(
+            message=update.message,
+            effective_chat=update.effective_chat,
+            effective_user=update.effective_user,
+            text=text,
+        )
+        await handle_message(synthetic, context)
 
     except Exception as e:
-        error_msg = f"Error handling document: {str(e)}"
-        logger.error(error_msg, exc_info=True)
+        logger.error(f"Error handling file {filename}: {e}", exc_info=True)
         await update.message.reply_text(t("error_file", lang))
+
+
+async def handle_document(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """Handle document uploads — download and forward to unified chat."""
+    doc = update.message.document
+    logger.info(f"Received document: {doc.file_name}")
+    await _download_and_forward(
+        update, context,
+        file_id=doc.file_id,
+        filename=doc.file_name,
+        file_size=doc.file_size,
+    )
+
+
+async def handle_photo(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """Handle photo uploads — download and forward to unified chat."""
+    photo = update.message.photo[-1]  # highest resolution
+    logger.info(f"Received photo: {photo.file_id} ({photo.width}x{photo.height})")
+    from datetime import datetime
+    timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
+    ext = Path(photo.file_path).suffix if getattr(photo, 'file_path', None) else ".jpg"
+    filename = f"photo_{timestamp}{ext}"
+    await _download_and_forward(
+        update, context,
+        file_id=photo.file_id,
+        filename=filename,
+        file_size=photo.file_size,
+    )
 
 
 async def handle_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
@@ -726,10 +722,16 @@ async def handle_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
         cb_uid = f"person-{person['id']}" if person else tg_id
         asyncio.create_task(persist_messages(cb_slug, cb_uid, f"[/{cmd}]", text))
 
-    elif data.startswith("select_project:"):
-        parts = data.split(":", 2)
-        slug = parts[1] if len(parts) > 1 else ""
-        name = parts[2] if len(parts) > 2 else slug
+    elif data.startswith("sp:"):
+        slug = data[3:]
+        # Get project name from the button that was clicked
+        name = slug
+        if query.message and query.message.reply_markup:
+            for row in query.message.reply_markup.inline_keyboard:
+                for btn in row:
+                    if btn.callback_data == data:
+                        name = btn.text
+                        break
         context.user_data["active_project"] = {"slug": slug, "name": name}
         await query.message.reply_text(
             t("project_selected", lang, name=name), parse_mode="HTML",
@@ -833,7 +835,7 @@ async def handle_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
                 text, buttons = t("no_projects", lang), []
             else:
                 btns = [[InlineKeyboardButton(
-                    p["name"], callback_data=f"select_project:{p['slug']}:{p['name'][:30]}"
+                    p["name"], callback_data=f"sp:{p['slug']}"
                 )] for p in projects]
                 await update.message.reply_text(
                     t("select_project", lang), reply_markup=InlineKeyboardMarkup(btns),
@@ -905,12 +907,13 @@ def main():
         builder = builder.post_init(post_init)
     application = builder.build()
 
-    # Add handlers — command handlers first (most specific), then text, then documents
+    # Add handlers — command handlers first (most specific), then text, then documents, then photos
     application.add_handler(CommandHandler(["start", "help", "tasks", "projects", "stats", "lang", "switch"], handle_command))
     application.add_handler(CommandHandler("open", handle_open_command))
     application.add_handler(CommandHandler("webapp", handle_webapp_command))
     application.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, handle_message))
     application.add_handler(MessageHandler(filters.Document.ALL, handle_document))
+    application.add_handler(MessageHandler(filters.PHOTO, handle_photo))
     application.add_handler(CallbackQueryHandler(handle_callback))
 
     # Start bot

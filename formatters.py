@@ -73,9 +73,9 @@ def format_task_list(
         mark = _status_label(tk.get("status"))
         due = _parse_date(tk.get("due_date"))
         due_str = f"  \u2014 {due}" if due else ""
-        tid = tk.get("id", "")
+        tid = tk.get("project_seq") or tk.get("id", "")
 
-        lines.append(f"{mark} <code>#{tid}</code>  <b>{tk['title']}</b>{due_str}")
+        lines.append(f"{mark} <code>T{tid}</code>  <b>{tk['title']}</b>{due_str}")
 
     if len(tasks) > 15:
         lines.append(f"\n<i>{t('and_n_more', lang, n=len(tasks) - 15)}</i>")
@@ -292,8 +292,8 @@ def format_greeting(
             mark = _status_label(tk.get("status"))
             due = _parse_date(tk.get("due_date"))
             due_str = f"  \u2014 {due}" if due else ""
-            tid = tk.get("id", "")
-            lines.append(f"{mark} <code>#{tid}</code>  {tk['title']}{due_str}")
+            tid = tk.get("project_seq") or tk.get("id", "")
+            lines.append(f"{mark} <code>T{tid}</code>  {tk['title']}{due_str}")
         if len(tasks) > 8:
             lines.append(f"<i>{t('and_n_more', lang, n=len(tasks) - 8)}</i>")
 

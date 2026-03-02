@@ -233,6 +233,16 @@ DICT: dict[str, dict[str, str]] = {
         "ko": "프로젝트가 없습니다.",
         "vi": "Khong tim thay du an.",
     },
+    "select_project": {
+        "en": "Which project would you like to work on?",
+        "ko": "어떤 프로젝트에서 작업하시겠습니까?",
+        "vi": "Ban muon lam viec voi du an nao?",
+    },
+    "project_selected": {
+        "en": "Switched to <b>{name}</b>. How can I help?",
+        "ko": "<b>{name}</b>(으)로 전환했습니다. 무엇을 도와드릴까요?",
+        "vi": "Da chuyen sang <b>{name}</b>. Toi co the giup gi?",
+    },
     "stats_title": {
         "en": "Project Stats",
         "ko": "프로젝트 통계",
