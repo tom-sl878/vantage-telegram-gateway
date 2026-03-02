@@ -959,6 +959,30 @@ async def handle_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
             parse_mode="HTML",
         )
 
+    elif data.startswith("download_doc:"):
+        doc_id = data.split(":")[1]
+        try:
+            async with httpx.AsyncClient(timeout=30) as client:
+                resp = await client.get(
+                    f"{BACKEND_API}/documents/{doc_id}/download",
+                    headers=_backend_headers(person_id=person.get("id") if person else None),
+                )
+            if resp.status_code == 200:
+                # Get filename from content-disposition header or use doc_id
+                cd = resp.headers.get("content-disposition", "")
+                fname = f"document_{doc_id}"
+                if "filename=" in cd:
+                    fname = cd.split("filename=")[-1].strip('"').strip("'")
+                from io import BytesIO
+                await context.bot.send_document(
+                    chat_id=chat_id, document=BytesIO(resp.content), filename=fname,
+                )
+            else:
+                await query.message.reply_text(t("error_generic", lang))
+        except Exception as e:
+            logger.error(f"Failed to download doc {doc_id}: {e}")
+            await query.message.reply_text(t("error_generic", lang))
+
     elif data.startswith("reopen_task:"):
         task_id = data.split(":")[1]
         await handle_message(

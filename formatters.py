@@ -144,11 +144,115 @@ def format_project_stats(
     return "\n".join(lines), buttons
 
 
+def _format_review_view(
+    task: dict, lang: str = "en",
+) -> tuple[str, list[list[InlineKeyboardButton]]]:
+    """Format task detail for REVIEWER persona (in_review status).
+
+    Focus: AI analysis, submitted files, approve/reject actions.
+    Hides submitter-focused content (guide, template, scope).
+    """
+    due = _parse_date(task.get("due_date"))
+    assignee = task.get("assignee_name") or t("unassigned", lang)
+    ri = task.get("report_info")
+    task_id = task["id"]
+
+    lines = [
+        f"🔍 <b>{task['title']}</b>\n",
+        f"<b>Status:</b> In Review",
+        f"<b>Submitted by:</b> {assignee}",
+    ]
+    if due:
+        lines.append(f"<b>Due:</b> {due}")
+
+    # Force-submit warning — prominent at top
+    if task.get("ai_analysis"):
+        try:
+            ai = json.loads(task["ai_analysis"])
+            if ai.get("force_submitted"):
+                submitter = ai.get("force_submitted_by", "Submitter")
+                lines.append(f"\n⚠️ <b>{submitter} overrode AI recommendation</b>")
+        except (json.JSONDecodeError, TypeError):
+            ai = None
+    else:
+        ai = None
+
+    # AI Analysis — the main focus for reviewers
+    if ai:
+        compat = ai.get("compatibility", "")
+        compat_icon = "✅" if compat == "yes" else "⚠️" if compat == "partial" else "❌"
+        rec = ai.get("recommendation", "")
+        rec_icon = "✅" if rec == "accept" else "⚠️" if rec == "accept_with_notes" else "❌"
+
+        lines.append(f"\n{'─' * 28}")
+        lines.append(f"<b>AI Analysis</b>\n")
+        lines.append(f"{compat_icon} <b>Compatibility:</b> {_format_label(compat)}")
+        lines.append(f"{rec_icon} <b>Recommendation:</b> {_format_label(rec)}")
+        if ai.get("confidence") is not None:
+            pct = round(ai["confidence"] * 100)
+            lines.append(f"<b>Confidence:</b> {pct}%")
+        if ai.get("summary"):
+            lines.append(f"\n{ai['summary']}")
+        if ai.get("recommendation_detail"):
+            lines.append(f"\n<i>{ai['recommendation_detail'][:400]}</i>")
+
+        # Gaps
+        gaps = ai.get("gaps", [])
+        if gaps:
+            lines.append(f"\n<b>Gaps identified:</b>")
+            for g in gaps[:5]:
+                if isinstance(g, dict):
+                    lines.append(f"  • {g.get('title', 'Unknown')}")
+                elif isinstance(g, str):
+                    lines.append(f"  • {g}")
+    elif task.get("ai_analysis"):
+        # Raw analysis fallback
+        lines.append(f"\n<b>AI Analysis</b>\n{str(task['ai_analysis'])[:500]}")
+
+    # Submitted files
+    docs = task.get("documents", [])
+    if docs:
+        lines.append(f"\n{'─' * 28}")
+        lines.append(f"<b>Submitted Files</b> ({len(docs)})")
+        for doc in docs[:10]:
+            size = doc.get("size", "")
+            lines.append(f"  📄 {doc['name']}  <i>{size}</i>")
+    elif task.get("document_count"):
+        lines.append(f"\n📎 {task['document_count']} file(s) attached")
+
+    # Buttons: download files, approve/reject
+    buttons: list[list[InlineKeyboardButton]] = []
+
+    # Download submitted files
+    if docs:
+        for doc in docs[:3]:  # Max 3 download buttons
+            if doc.get("doc_type") == "submission":
+                buttons.append([InlineKeyboardButton(
+                    f"📥 {doc['name'][:30]}",
+                    callback_data=f"download_doc:{doc['id']}",
+                )])
+
+    # Approve / Request Resubmission
+    if ri and ri.get("instance_id"):
+        buttons.append([
+            InlineKeyboardButton(f"✅ {t('btn_approve', lang)}", callback_data=f"approve_instance:{ri['instance_id']}"),
+            InlineKeyboardButton(f"🔄 {t('btn_request_resubmit', lang)}", callback_data=f"reject_instance:{ri['instance_id']}"),
+        ])
+
+    return "\n".join(lines), buttons
+
+
 def format_task_detail(
     task: dict, lang: str = "en",
 ) -> tuple[str, list[list[InlineKeyboardButton]]]:
     """Format a single task detail into HTML + action buttons."""
-    mark = _status_label(task.get("status"))
+    status = task.get("status", "")
+
+    # Reviewer-focused view for in_review tasks
+    if status == "in_review":
+        return _format_review_view(task, lang)
+
+    mark = _status_label(status)
     due = _parse_date(task.get("due_date"))
     assignee = task.get("assignee_name") or t("unassigned", lang)
 
@@ -217,13 +321,10 @@ def format_task_detail(
             fname = ri.get("template_file", "template")
             lines.append(f"\n📎 {t('template_available', lang, file=fname)}")
 
-    # AI Analysis (shown for in_review and complete tasks with analysis)
+    # AI Analysis (shown for complete tasks with analysis)
     if task.get("ai_analysis"):
         try:
             ai = json.loads(task["ai_analysis"])
-            if ai.get("force_submitted"):
-                submitter = ai.get("force_submitted_by", "Submitter")
-                lines.append(f"\n⚠️ <b>{submitter} overrode AI recommendation</b>")
             lines.append(f"\n<b>AI Analysis</b>")
             if ai.get("summary"):
                 lines.append(ai["summary"])
@@ -241,7 +342,6 @@ def format_task_detail(
         lines.append(f"\n📎 {task['document_count']} file(s) attached")
 
     task_id = task["id"]
-    status = task.get("status", "")
     buttons: list[list[InlineKeyboardButton]] = []
 
     # Template download + full guide buttons for report tasks
@@ -265,13 +365,6 @@ def format_task_detail(
         buttons.append([
             InlineKeyboardButton(t("btn_reopen", lang), callback_data=f"reopen_task:{task_id}"),
         ])
-    elif status == "in_review":
-        # Show approve/reject buttons for report tasks
-        if ri and ri.get("instance_id"):
-            buttons.append([
-                InlineKeyboardButton(f"✅ {t('btn_approve', lang)}", callback_data=f"approve_instance:{ri['instance_id']}"),
-                InlineKeyboardButton(f"🔄 {t('btn_request_resubmit', lang)}", callback_data=f"reject_instance:{ri['instance_id']}"),
-            ])
     elif status == "in_progress":
         buttons.append([
             InlineKeyboardButton(t("btn_complete", lang), callback_data=f"complete_task:{task_id}"),
