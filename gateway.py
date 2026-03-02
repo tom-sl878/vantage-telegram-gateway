@@ -415,13 +415,31 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
         # Send any files returned by backend (e.g., report templates)
         for file_info in backend_files:
             try:
-                fpath = file_info["path"]
                 fname = file_info["filename"]
-                with open(fpath, "rb") as f:
+                file_url = file_info.get("url")
+                fpath = file_info.get("path")
+                file_bytes = None
+
+                # Prefer URL download (works across Docker containers)
+                if file_url:
+                    dl_url = f"{BACKEND_API}{file_url}" if file_url.startswith("/") else file_url
+                    async with httpx.AsyncClient(timeout=30) as client:
+                        resp = await client.get(dl_url)
+                        resp.raise_for_status()
+                        file_bytes = resp.content
+                # Fallback to local file path (same-host only)
+                elif fpath:
+                    with open(fpath, "rb") as f:
+                        file_bytes = f.read()
+
+                if file_bytes:
+                    from io import BytesIO
                     await context.bot.send_document(
-                        chat_id=chat_id, document=f, filename=fname,
+                        chat_id=chat_id, document=BytesIO(file_bytes), filename=fname,
                     )
-                logger.info(f"Sent file: {fname}")
+                    logger.info(f"Sent file: {fname} ({len(file_bytes)} bytes)")
+                else:
+                    logger.warning(f"No file content for {fname}")
             except Exception as e:
                 logger.error(f"Failed to send file {file_info.get('filename')}: {e}")
 
