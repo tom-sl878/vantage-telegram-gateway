@@ -463,6 +463,38 @@ def _human_size(byte_count: int | None) -> str:
     return "unknown"
 
 
+def _format_analysis(analysis: dict, filename: str, task_title: str, lang: str) -> str:
+    """Format submit_task analysis as Telegram HTML."""
+    lines = [f"<b>{filename}</b>"]
+    lines.append(f"Task: {task_title}\n")
+
+    summary = analysis.get("summary", "")
+    if summary:
+        lines.append(f"<b>Analysis</b>\n{summary}")
+
+    compatibility = analysis.get("compatibility", "")
+    if compatibility:
+        label = compatibility.replace("_", " ").title()
+        lines.append(f"\nCompatibility: <b>{label}</b>")
+
+    recommendation = analysis.get("recommendation", "")
+    rec_detail = analysis.get("recommendation_detail", "")
+    if recommendation:
+        label = recommendation.replace("_", " ").title()
+        lines.append(f"Recommendation: <b>{label}</b>")
+    if rec_detail:
+        lines.append(rec_detail[:400])
+
+    gaps = analysis.get("gaps", [])
+    if gaps:
+        lines.append("\n⚠️ <b>Gaps:</b>")
+        for g in gaps[:5]:
+            if isinstance(g, dict):
+                lines.append(f"  • {g.get('title', 'Unknown')}: {g.get('detail', '')[:100]}")
+
+    return "\n".join(lines)
+
+
 async def _download_and_forward(
     update: Update,
     context: ContextTypes.DEFAULT_TYPE,
@@ -471,11 +503,13 @@ async def _download_and_forward(
     filename: str,
     file_size: int | None,
 ) -> None:
-    """Download a Telegram file, store metadata, and forward to unified chat.
+    """Download a Telegram file and submit to the active task or forward to chat.
 
-    Works for documents, photos, and any future media type.  All
-    intelligence (task matching, smart suggestions) lives in the backend
-    chat endpoint — the gateway just downloads and forwards.
+    If the user has an active task (started via Start button), the file is
+    uploaded directly to the submit_task endpoint for structured AI analysis,
+    then "Yes, Complete" / "Cancel" buttons are shown.
+
+    Otherwise, falls through to the LLM chat for general handling.
     """
     tg_id = str(update.effective_user.id)
     person = await resolve_person(tg_id, context)
@@ -484,6 +518,8 @@ async def _download_and_forward(
         await update.message.reply_text(t("verify_prompt", lang), parse_mode="HTML")
         return
 
+    chat_id = update.effective_chat.id
+
     try:
         MEDIA_INBOX.mkdir(parents=True, exist_ok=True)
         file = await context.bot.get_file(file_id)
@@ -491,7 +527,53 @@ async def _download_and_forward(
         await file.download_to_drive(file_path)
         logger.info(f"Saved file to: {file_path}")
 
-        # Store for handle_message → backend attachment payload
+        active_task_id = context.user_data.get("active_task_id")
+
+        if active_task_id:
+            # Direct submit_task flow — structured analysis + confirm buttons
+            await context.bot.send_chat_action(chat_id=chat_id, action="typing")
+            headers = _backend_headers(person_id=person.get("id") if person else None)
+
+            try:
+                with open(file_path, "rb") as f:
+                    async with httpx.AsyncClient(timeout=180) as client:
+                        resp = await client.post(
+                            f"{BACKEND_API}/tasks/{active_task_id}/submit",
+                            files={"file": (filename, f)},
+                            headers=headers,
+                        )
+
+                if resp.status_code == 200:
+                    result = resp.json()
+                    analysis = result.get("analysis", {})
+                    task_title = context.user_data.get("active_task_title", f"Task #{active_task_id}")
+
+                    # Format analysis message
+                    text = _format_analysis(analysis, filename, task_title, lang)
+
+                    # Show confirm buttons
+                    buttons = [[
+                        InlineKeyboardButton(
+                            t("btn_yes_complete", lang),
+                            callback_data=f"confirm_complete:{active_task_id}",
+                        ),
+                        InlineKeyboardButton(
+                            t("btn_cancel", lang),
+                            callback_data="dismiss",
+                        ),
+                    ]]
+                    await update.message.reply_text(
+                        text, parse_mode="HTML",
+                        reply_markup=InlineKeyboardMarkup(buttons),
+                    )
+                    logger.info(f"File {filename} submitted for task {active_task_id}")
+                    return
+                else:
+                    logger.warning(f"submit_task failed ({resp.status_code}), falling through to LLM")
+            except Exception as e:
+                logger.warning(f"submit_task error: {e}, falling through to LLM")
+
+        # Fallback: no active task or submit_task failed — route through LLM chat
         context.user_data['last_upload'] = {
             'filename': filename,
             'path': str(file_path),
@@ -499,9 +581,7 @@ async def _download_and_forward(
             'timestamp': update.message.date.isoformat(),
         }
 
-        # Caption or simple default — backend LLM has full context to handle it
         text = update.message.caption or f"I uploaded a file: {filename}"
-
         synthetic = _SyntheticUpdate(
             message=update.message,
             effective_chat=update.effective_chat,
@@ -576,6 +656,8 @@ async def _complete_task_direct(task_id: str, chat_id: int, person: dict | None,
                 text=text,
                 parse_mode="HTML",
             )
+            context.user_data.pop("active_task_id", None)
+            context.user_data.pop("active_task_title", None)
             logger.info(f"Task {task_id} set to {new_status} via direct API")
         else:
             detail = resp.json().get("detail", "Unknown error") if resp.headers.get("content-type", "").startswith("application/json") else resp.text[:200]
@@ -715,6 +797,8 @@ async def handle_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
             if resp.status_code == 200:
                 task = resp.json()
                 title = task.get("title", f"Task #{task_id}")
+                context.user_data["active_task_id"] = task_id
+                context.user_data["active_task_title"] = title
                 await query.message.reply_text(
                     f"▶️ <b>{title}</b>\n{t('task_started', lang)}",
                     parse_mode="HTML",

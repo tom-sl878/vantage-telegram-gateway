@@ -546,9 +546,9 @@ DICT: dict[str, dict[str, str]] = {
         "vi": "Yêu cầu nộp lại",
     },
     "task_started": {
-        "en": "Task started. Good luck!",
-        "ko": "작업이 시작되었습니다. 화이팅!",
-        "vi": "Công việc đã bắt đầu. Chúc may mắn!",
+        "en": "Task started.",
+        "ko": "작업이 시작되었습니다.",
+        "vi": "Công việc đã bắt đầu.",
     },
 }
 
