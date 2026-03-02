@@ -576,7 +576,7 @@ async def handle_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
         report_id = data.split(":")[1]
         try:
             # Try blank template first, fall back to original
-            for endpoint in (f"/api/reports/{report_id}/blank-template", f"/api/reports/{report_id}/template-file"):
+            for endpoint in (f"/reports/{report_id}/blank-template", f"/reports/{report_id}/template-file"):
                 async with httpx.AsyncClient(timeout=30) as client:
                     resp = await client.get(f"{BACKEND_API}{endpoint}")
                 if resp.status_code == 200:
