@@ -575,16 +575,37 @@ async def handle_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
         # Download template directly from backend and send as document
         report_id = data.split(":")[1]
         try:
+            async with httpx.AsyncClient(timeout=30) as client:
+                # Get report details (for project context + template filename)
+                report_resp = await client.get(f"{BACKEND_API}/reports/{report_id}")
+                info_resp = await client.get(f"{BACKEND_API}/reports/{report_id}/template-info")
+
+            # Set active project from report so follow-up messages have context
+            if report_resp.status_code == 200:
+                rpt = report_resp.json()
+                project_id = rpt.get("project_id")
+                if project_id and person:
+                    projects = await _get_person_projects(person["id"])
+                    for p in projects:
+                        if p["id"] == project_id:
+                            context.user_data["active_project"] = {"slug": p["slug"], "name": p["name"]}
+                            break
+
+            tpl_info = info_resp.json() if info_resp.status_code == 200 else {}
+            original_fname = tpl_info.get("template_file", "template.pdf")
+
             # Try blank template first, fall back to original
-            for endpoint in (f"/reports/{report_id}/blank-template", f"/reports/{report_id}/template-file"):
+            for endpoint, is_blank in (
+                (f"/reports/{report_id}/blank-template", True),
+                (f"/reports/{report_id}/template-file", False),
+            ):
                 async with httpx.AsyncClient(timeout=30) as client:
                     resp = await client.get(f"{BACKEND_API}{endpoint}")
                 if resp.status_code == 200:
-                    # Extract filename from content-disposition header
-                    cd = resp.headers.get("content-disposition", "")
-                    fname = "template.pdf"
-                    if "filename=" in cd:
-                        fname = cd.split("filename=")[-1].strip('"').strip("'")
+                    from pathlib import PurePath
+                    stem = PurePath(original_fname).stem
+                    ext = PurePath(original_fname).suffix or ".pdf"
+                    fname = f"{stem}_blank{ext}" if is_blank else original_fname
                     from io import BytesIO
                     await context.bot.send_document(
                         chat_id=chat_id, document=BytesIO(resp.content), filename=fname,
@@ -729,6 +750,11 @@ async def handle_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
         except Exception:
             result = {"error": "fetch failed"}
         if isinstance(result, dict) and not result.get("error"):
+            # Set active project from task context
+            p_slug = result.get("project_slug")
+            p_name = result.get("project_name")
+            if p_slug and p_name:
+                context.user_data["active_project"] = {"slug": p_slug, "name": p_name}
             text, buttons = format_task_detail(result, lang=lang)
         else:
             text, buttons = t("fetch_error", lang, item=f"task {task_id}", error="not found"), []
