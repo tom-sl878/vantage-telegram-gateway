@@ -543,6 +543,34 @@ async def handle_photo(update: Update, context: ContextTypes.DEFAULT_TYPE):
     )
 
 
+async def _complete_task_direct(task_id: str, chat_id: int, person: dict | None, context, lang: str):
+    """Complete a task directly via backend API (not via LLM)."""
+    headers = _backend_headers(person_id=person.get("id") if person else None)
+    try:
+        async with httpx.AsyncClient(timeout=15) as client:
+            resp = await client.patch(
+                f"{BACKEND_API}/tasks/{task_id}",
+                json={"status": "complete"},
+                headers=headers,
+            )
+        if resp.status_code == 200:
+            task = resp.json()
+            title = task.get("title", f"Task #{task_id}")
+            await context.bot.send_message(
+                chat_id=chat_id,
+                text=f"✅ <b>{title}</b>\n{t('task_completed', lang)}",
+                parse_mode="HTML",
+            )
+            logger.info(f"Task {task_id} completed via direct API")
+        else:
+            detail = resp.json().get("detail", "Unknown error") if resp.headers.get("content-type", "").startswith("application/json") else resp.text[:200]
+            logger.error(f"Failed to complete task {task_id}: {resp.status_code} {detail}")
+            await context.bot.send_message(chat_id=chat_id, text=t("error_generic", lang))
+    except Exception as e:
+        logger.error(f"Error completing task {task_id}: {e}")
+        await context.bot.send_message(chat_id=chat_id, text=t("error_generic", lang))
+
+
 async def handle_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
     """Handle inline keyboard button presses."""
     query = update.callback_query
@@ -685,18 +713,12 @@ async def handle_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
             ]]
             await query.message.reply_text(warning, parse_mode="HTML", reply_markup=InlineKeyboardMarkup(buttons))
         else:
-            # No issues — complete directly
-            await handle_message(
-                _synth(f"Mark task {task_id} as complete"),
-                context,
-            )
+            # No issues — complete directly via API
+            await _complete_task_direct(task_id, chat_id, person, context, lang)
 
     elif data.startswith("force_complete:"):
         task_id = data.split(":")[1]
-        await handle_message(
-            _synth(f"Mark task {task_id} as complete"),
-            context,
-        )
+        await _complete_task_direct(task_id, chat_id, person, context, lang)
 
     elif data == "dismiss":
         await query.message.reply_text(t("action_cancelled", lang), parse_mode="HTML")
