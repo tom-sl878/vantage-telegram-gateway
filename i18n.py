@@ -530,6 +530,11 @@ DICT: dict[str, dict[str, str]] = {
         "ko": "검토를 위해 제출되었습니다. 보고서 담당자에게 알림이 전송됩니다.",
         "vi": "Đã nộp để xét duyệt. Người phụ trách báo cáo sẽ được thông báo.",
     },
+    "btn_full_guide": {
+        "en": "Full Guide",
+        "ko": "전체 가이드",
+        "vi": "Hướng dẫn đầy đủ",
+    },
     "btn_approve": {
         "en": "Approve",
         "ko": "승인",

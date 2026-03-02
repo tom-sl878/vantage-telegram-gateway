@@ -661,6 +661,40 @@ async def handle_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
             await query.message.reply_text(t("error_generic", lang))
         return
 
+    elif data.startswith("full_guide:"):
+        # Send the full submission guide as a separate message
+        guide_task_id = data.split(":")[1]
+        try:
+            async with httpx.AsyncClient(timeout=15) as client:
+                resp = await client.get(
+                    f"{BACKEND_API}/tasks/{guide_task_id}/detail",
+                    headers=_backend_headers(person_id=person.get("id") if person else None),
+                )
+            if resp.status_code == 200:
+                task_data = resp.json()
+                ri = task_data.get("report_info", {})
+                guide = ri.get("submission_guide", "")
+                if guide:
+                    # Telegram message limit is 4096 chars — split if needed
+                    header = f"<b>{t('submission_guide', lang)}</b>\n\n"
+                    max_len = 4096 - len(header)
+                    if len(guide) <= max_len:
+                        await query.message.reply_text(header + guide, parse_mode="HTML")
+                    else:
+                        # Send in chunks
+                        for i in range(0, len(guide), max_len):
+                            chunk = guide[i:i + max_len]
+                            prefix = header if i == 0 else ""
+                            await context.bot.send_message(chat_id=chat_id, text=prefix + chunk, parse_mode="HTML")
+                else:
+                    await query.message.reply_text("No submission guide available.")
+            else:
+                await query.message.reply_text(t("error_generic", lang))
+        except Exception as e:
+            logger.error(f"Failed to send full guide for task {guide_task_id}: {e}")
+            await query.message.reply_text(t("error_generic", lang))
+        return
+
     elif data.startswith("fill_report:"):
         report_id = data.split(":")[1]
         await handle_message(

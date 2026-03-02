@@ -202,15 +202,16 @@ def format_task_detail(
 
     # Report-specific info (submission guide, description, template)
     ri = task.get("report_info")
+    guide_truncated = False
     if ri:
         if ri.get("report_description"):
             rdesc = _clean_markdown(ri["report_description"])
             lines.append(f"\n<b>{t('report_description', lang)}</b>\n{rdesc}")
         if ri.get("submission_guide"):
             guide = _clean_markdown(ri["submission_guide"])
-            # Truncate long guides for Telegram message limits
-            if len(guide) > 1500:
-                guide = guide[:1500] + "…"
+            guide_truncated = len(guide) > 800
+            if guide_truncated:
+                guide = guide[:800] + "…"
             lines.append(f"\n<b>{t('submission_guide', lang)}</b>\n{guide}")
         if ri.get("has_template"):
             fname = ri.get("template_file", "template")
@@ -240,14 +241,23 @@ def format_task_detail(
     status = task.get("status", "")
     buttons: list[list[InlineKeyboardButton]] = []
 
-    # Template download button for report tasks
+    # Template download + full guide buttons for report tasks
     if ri and ri.get("has_template"):
-        buttons.append([
-            InlineKeyboardButton(
-                f"📎 {t('btn_get_template', lang)}",
-                callback_data=f"get_template:{ri['report_id']}",
-            ),
-        ])
+        row = [InlineKeyboardButton(
+            f"📎 {t('btn_get_template', lang)}",
+            callback_data=f"get_template:{ri['report_id']}",
+        )]
+        if guide_truncated:
+            row.append(InlineKeyboardButton(
+                f"📋 {t('btn_full_guide', lang)}",
+                callback_data=f"full_guide:{task_id}",
+            ))
+        buttons.append(row)
+    elif ri and guide_truncated:
+        buttons.append([InlineKeyboardButton(
+            f"📋 {t('btn_full_guide', lang)}",
+            callback_data=f"full_guide:{task_id}",
+        )])
     if status == "complete":
         buttons.append([
             InlineKeyboardButton(t("btn_reopen", lang), callback_data=f"reopen_task:{task_id}"),
