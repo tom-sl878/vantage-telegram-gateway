@@ -527,7 +527,37 @@ async def _download_and_forward(
         await file.download_to_drive(file_path)
         logger.info(f"Saved file to: {file_path}")
 
+        # Find the user's active task — check user_data first, then query backend
         active_task_id = context.user_data.get("active_task_id")
+        active_task_title = context.user_data.get("active_task_title")
+
+        if not active_task_id and person:
+            # Query backend for this person's in-progress tasks
+            try:
+                headers = _backend_headers(person_id=person.get("id"))
+                async with httpx.AsyncClient(timeout=10) as client:
+                    resp = await client.get(
+                        f"{BACKEND_API}/people/{person['id']}/tasks",
+                        params={"days": 30, "include_no_due": "true"},
+                        headers=headers,
+                    )
+                if resp.status_code == 200:
+                    all_tasks = resp.json()
+                    if isinstance(all_tasks, list):
+                        in_progress = [t for t in all_tasks if t.get("status") == "in_progress"]
+                        if len(in_progress) == 1:
+                            active_task_id = str(in_progress[0]["id"])
+                            active_task_title = in_progress[0].get("title", f"Task #{active_task_id}")
+                            logger.info(f"Auto-detected active task {active_task_id} for person {person['id']}")
+                        elif len(in_progress) > 1:
+                            # Multiple in-progress — prefer reporting tasks
+                            reporting = [t for t in in_progress if t.get("source") == "reporting"]
+                            if len(reporting) == 1:
+                                active_task_id = str(reporting[0]["id"])
+                                active_task_title = reporting[0].get("title", f"Task #{active_task_id}")
+                                logger.info(f"Auto-detected reporting task {active_task_id} for person {person['id']}")
+            except Exception as e:
+                logger.debug(f"Could not query person tasks: {e}")
 
         if active_task_id:
             # Direct submit_task flow — structured analysis + confirm buttons
@@ -546,10 +576,11 @@ async def _download_and_forward(
                 if resp.status_code == 200:
                     result = resp.json()
                     analysis = result.get("analysis", {})
-                    task_title = context.user_data.get("active_task_title", f"Task #{active_task_id}")
+                    if not active_task_title:
+                        active_task_title = f"Task #{active_task_id}"
 
                     # Format analysis message
-                    text = _format_analysis(analysis, filename, task_title, lang)
+                    text = _format_analysis(analysis, filename, active_task_title, lang)
 
                     # Show confirm buttons
                     buttons = [[
