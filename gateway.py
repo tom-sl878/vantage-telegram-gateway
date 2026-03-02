@@ -572,15 +572,30 @@ async def handle_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
         )
 
     if data.startswith("get_template:"):
-        # Route through backend chat as a synthetic message for consistency
+        # Download template directly from backend and send as document
         report_id = data.split(":")[1]
-        synthetic = _SyntheticUpdate(
-            message=query.message,
-            effective_chat=query.message.chat,
-            effective_user=query.from_user,
-            text=f"Send me the template for report {report_id}",
-        )
-        await handle_message(synthetic, context)
+        try:
+            # Try blank template first, fall back to original
+            for endpoint in (f"/api/reports/{report_id}/blank-template", f"/api/reports/{report_id}/template-file"):
+                async with httpx.AsyncClient(timeout=30) as client:
+                    resp = await client.get(f"{BACKEND_API}{endpoint}")
+                if resp.status_code == 200:
+                    # Extract filename from content-disposition header
+                    cd = resp.headers.get("content-disposition", "")
+                    fname = "template.pdf"
+                    if "filename=" in cd:
+                        fname = cd.split("filename=")[-1].strip('"').strip("'")
+                    from io import BytesIO
+                    await context.bot.send_document(
+                        chat_id=chat_id, document=BytesIO(resp.content), filename=fname,
+                    )
+                    logger.info(f"Sent template: {fname} ({len(resp.content)} bytes)")
+                    return
+            await query.message.reply_text(t("error_generic", lang))
+        except Exception as e:
+            logger.error(f"Failed to send template for report {report_id}: {e}")
+            await query.message.reply_text(t("error_generic", lang))
+        return
 
     elif data.startswith("fill_report:"):
         report_id = data.split(":")[1]
