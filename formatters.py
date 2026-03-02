@@ -1,5 +1,6 @@
 """Format tool results into Telegram HTML + inline buttons."""
 
+import json
 import re
 from datetime import datetime
 
@@ -215,6 +216,26 @@ def format_task_detail(
             fname = ri.get("template_file", "template")
             lines.append(f"\n📎 {t('template_available', lang, file=fname)}")
 
+    # AI Analysis (shown for in_review and complete tasks with analysis)
+    if task.get("ai_analysis"):
+        try:
+            ai = json.loads(task["ai_analysis"])
+            lines.append(f"\n<b>AI Analysis</b>")
+            if ai.get("summary"):
+                lines.append(ai["summary"])
+            if ai.get("compatibility"):
+                lines.append(f"Compatibility: {_format_label(ai['compatibility'])}")
+            if ai.get("recommendation_detail"):
+                detail = ai["recommendation_detail"][:300]
+                lines.append(f"Recommendation: {detail}")
+        except (json.JSONDecodeError, TypeError):
+            analysis_text = str(task["ai_analysis"])[:500]
+            lines.append(f"\n<b>AI Analysis</b>\n{analysis_text}")
+
+    # File count
+    if task.get("document_count"):
+        lines.append(f"\n📎 {task['document_count']} file(s) attached")
+
     task_id = task["id"]
     status = task.get("status", "")
     buttons: list[list[InlineKeyboardButton]] = []
@@ -231,6 +252,13 @@ def format_task_detail(
         buttons.append([
             InlineKeyboardButton(t("btn_reopen", lang), callback_data=f"reopen_task:{task_id}"),
         ])
+    elif status == "in_review":
+        # Show approve/reject buttons for report tasks
+        if ri and ri.get("instance_id"):
+            buttons.append([
+                InlineKeyboardButton(f"✅ {t('btn_approve', lang)}", callback_data=f"approve_instance:{ri['instance_id']}"),
+                InlineKeyboardButton(f"🔄 {t('btn_request_resubmit', lang)}", callback_data=f"reject_instance:{ri['instance_id']}"),
+            ])
     elif status == "in_progress":
         buttons.append([
             InlineKeyboardButton(t("btn_complete", lang), callback_data=f"complete_task:{task_id}"),

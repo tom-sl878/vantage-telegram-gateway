@@ -520,6 +520,26 @@ DICT: dict[str, dict[str, str]] = {
         "ko": "{admin_name}에게 요청을 보냈습니다.",
         "vi": "Da gui yeu cau den {admin_name}.",
     },
+    "task_completed": {
+        "en": "Task completed.",
+        "ko": "작업이 완료되었습니다.",
+        "vi": "Nhiệm vụ đã hoàn thành.",
+    },
+    "task_submitted_review": {
+        "en": "Submitted for review. The report owner will be notified.",
+        "ko": "검토를 위해 제출되었습니다. 보고서 담당자에게 알림이 전송됩니다.",
+        "vi": "Đã nộp để xét duyệt. Người phụ trách báo cáo sẽ được thông báo.",
+    },
+    "btn_approve": {
+        "en": "Approve",
+        "ko": "승인",
+        "vi": "Phê duyệt",
+    },
+    "btn_request_resubmit": {
+        "en": "Request Resubmission",
+        "ko": "재제출 요청",
+        "vi": "Yêu cầu nộp lại",
+    },
 }
 
 

@@ -544,30 +544,45 @@ async def handle_photo(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
 
 async def _complete_task_direct(task_id: str, chat_id: int, person: dict | None, context, lang: str):
-    """Complete a task directly via backend API (not via LLM)."""
+    """Complete a task directly via backend API (not via LLM).
+
+    Report tasks go to 'in_review' instead of 'complete' so the owner can review.
+    """
     headers = _backend_headers(person_id=person.get("id") if person else None)
     try:
         async with httpx.AsyncClient(timeout=15) as client:
+            # Fetch task to check if it's a report task
+            task_resp = await client.get(
+                f"{BACKEND_API}/tasks/{task_id}",
+                headers=headers,
+            )
+            task_data = task_resp.json() if task_resp.status_code == 200 else {}
+            new_status = "in_review" if task_data.get("source") == "reporting" else "complete"
+
             resp = await client.patch(
                 f"{BACKEND_API}/tasks/{task_id}",
-                json={"status": "complete"},
+                json={"status": new_status},
                 headers=headers,
             )
         if resp.status_code == 200:
             task = resp.json()
             title = task.get("title", f"Task #{task_id}")
+            if new_status == "in_review":
+                text = f"📋 <b>{title}</b>\n{t('task_submitted_review', lang)}"
+            else:
+                text = f"✅ <b>{title}</b>\n{t('task_completed', lang)}"
             await context.bot.send_message(
                 chat_id=chat_id,
-                text=f"✅ <b>{title}</b>\n{t('task_completed', lang)}",
+                text=text,
                 parse_mode="HTML",
             )
-            logger.info(f"Task {task_id} completed via direct API")
+            logger.info(f"Task {task_id} set to {new_status} via direct API")
         else:
             detail = resp.json().get("detail", "Unknown error") if resp.headers.get("content-type", "").startswith("application/json") else resp.text[:200]
-            logger.error(f"Failed to complete task {task_id}: {resp.status_code} {detail}")
+            logger.error(f"Failed to update task {task_id}: {resp.status_code} {detail}")
             await context.bot.send_message(chat_id=chat_id, text=t("error_generic", lang))
     except Exception as e:
-        logger.error(f"Error completing task {task_id}: {e}")
+        logger.error(f"Error updating task {task_id}: {e}")
         await context.bot.send_message(chat_id=chat_id, text=t("error_generic", lang))
 
 
@@ -817,6 +832,63 @@ async def handle_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
         await query.message.reply_text(
             t("project_selected", lang, name=name), parse_mode="HTML",
         )
+
+    elif data.startswith("approve_instance:"):
+        instance_id = data.split(":")[1]
+        person_id = person.get("id") if person else None
+        try:
+            async with httpx.AsyncClient(timeout=15) as client:
+                resp = await client.post(
+                    f"{BACKEND_API}/report-instances/{instance_id}/approve",
+                    params={"approved_by_id": person_id} if person_id else {},
+                    headers=_backend_headers(person_id=person_id),
+                )
+            if resp.status_code == 200:
+                inst = resp.json()
+                await query.message.reply_text(
+                    f"✅ <b>Report instance approved</b>\n"
+                    f"Period: {inst.get('period_label', 'Unknown')}\n"
+                    f"Status: Approved",
+                    parse_mode="HTML",
+                )
+            else:
+                detail = resp.json().get("detail", "Unknown error") if resp.headers.get("content-type", "").startswith("application/json") else resp.text[:200]
+                await query.message.reply_text(f"❌ Failed to approve: {detail}", parse_mode="HTML")
+        except Exception as e:
+            logger.error(f"Failed to approve instance {instance_id}: {e}")
+            await query.message.reply_text(t("error_generic", lang))
+
+    elif data.startswith("reject_instance:"):
+        instance_id = data.split(":")[1]
+        # Reopen the submit task so the submitter can resubmit
+        try:
+            async with httpx.AsyncClient(timeout=15) as client:
+                inst_resp = await client.get(
+                    f"{BACKEND_API}/report-instances/{instance_id}",
+                    headers=_backend_headers(person_id=person.get("id") if person else None),
+                )
+            if inst_resp.status_code == 200:
+                inst = inst_resp.json()
+                submit_task_id = inst.get("submit_task_id")
+                if submit_task_id:
+                    async with httpx.AsyncClient(timeout=15) as client:
+                        await client.patch(
+                            f"{BACKEND_API}/tasks/{submit_task_id}",
+                            json={"status": "todo"},
+                            headers=_backend_headers(person_id=person.get("id") if person else None),
+                        )
+                    await query.message.reply_text(
+                        f"🔄 <b>Resubmission requested</b>\n"
+                        f"The submitter's task has been reopened. They will be notified to resubmit.",
+                        parse_mode="HTML",
+                    )
+                else:
+                    await query.message.reply_text("❌ Could not find the submission task.", parse_mode="HTML")
+            else:
+                await query.message.reply_text(t("error_generic", lang))
+        except Exception as e:
+            logger.error(f"Failed to reject instance {instance_id}: {e}")
+            await query.message.reply_text(t("error_generic", lang))
 
     else:
         logger.warning(f"Unknown callback data: {data}")
