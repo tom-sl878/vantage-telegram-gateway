@@ -582,6 +582,8 @@ async def _download_and_forward(
             # Direct submit_task flow — structured analysis + confirm buttons
             await context.bot.send_chat_action(chat_id=chat_id, action="typing")
             headers = _backend_headers(person_id=person.get("id") if person else None)
+            # Remove Content-Type so httpx sets multipart boundary automatically
+            headers.pop("Content-Type", None)
 
             try:
                 with open(file_path, "rb") as f:
@@ -628,7 +630,7 @@ async def _download_and_forward(
                     logger.info(f"File {filename} submitted for task {active_task_id}")
                     return
                 else:
-                    logger.warning(f"submit_task failed ({resp.status_code}), falling through to LLM")
+                    logger.warning(f"submit_task failed ({resp.status_code}): {resp.text[:300]}, falling through to LLM")
             except Exception as e:
                 logger.warning(f"submit_task error: {e}, falling through to LLM")
 
